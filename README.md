@@ -1,9 +1,17 @@
 # MCAD Telegram Bot
 
-Checks BleepingComputer’s RSS feed every 15 minutes and sends links
-to possible maritime cyber reports through Telegram.
+A university prototype that finds possible maritime cybersecurity
+reports on BleepingComputer and sends links through Telegram.
 
-The prototype uses keyword filtering, not AI. Reports need human review.
+It has two modes:
+
+- Automatic alerts: checks the recent RSS feed every 15 minutes
+  and sends new matching links to your configured chat.
+- Telegram commands: replies to /latest with the newest matching
+  report listed in BleepingComputer’s Port news archive.
+
+The prototype uses keyword filtering, not AI.
+All reports require human review.
 
 ## Before starting
 
@@ -474,9 +482,16 @@ no matching maritime reports.
 The fictional example in this script is only a local filter test.
 It does not send anything to Telegram.
 
-## 11. Start automatic checks
+## 11. Choose how to run the bot
 
-On macOS or Linux:
+There are two separate programs. Choose the mode you want to use.
+
+### Option A — Automatic alerts
+
+Checks the recent RSS feed immediately, then every 15 minutes.
+Sends matching links to the chat ID saved in your .env.
+
+On macOS or Linux, with the virtual environment activated:
 
 ```bash
 python bot.py
@@ -488,58 +503,133 @@ On Windows PowerShell:
 .\.venv\Scripts\python.exe bot.py
 ```
 
-Expected output looks like:
+Previously sent URLs are skipped using local history.
 
-```text
-MCAD bot started. Checking every 15 minutes.
-Press Control + C to stop.
-Checked 15 articles.
-Sent 0 new links.
-Waiting 15 minutes before the next check...
-```
+No Telegram message is expected when there are no new matches.
 
-The article count may differ.
+### Option B — Reply to Telegram commands
 
-The bot sends only matching links that this local copy has not
-already sent. It does not send a message after every check.
+Listens for messages sent to the shared bot.
 
-Keep your computer awake, connected to the internet, and the
-program running.
-
-Closing the terminal or shutting down the computer stops the bot.
-
-To stop it, press Control + C.
-
-On macOS, you can optionally run it with:
+On macOS or Linux, with the virtual environment activated:
 
 ```bash
-caffeinate -i python bot.py
+python commands.py
 ```
 
-This prevents idle system sleep while the command runs.
-Keep the laptop lid open.
+On Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe commands.py
+```
+
+Keep the program running, then open:
+
+https://t.me/MCADAlertsBot
+
+Send:
+
+```text
+/latest
+```
+
+The bot replies in the private chat that sent the command.
+
+To see the available instructions, send:
+
+```text
+/help
+```
+
+### What /latest means
+
+The command downloads BleepingComputer’s Port news archive:
+
+https://www.bleepingcomputer.com/tag/port/
+
+It finds security article headings containing incident-related
+words such as cyberattack, ransomware, or breach.
+
+It returns the first matching report in the archive’s display order.
+
+It does not currently:
+
+- Compare publication dates itself.
+- Search the entire website.
+- Search every maritime organisation or incident.
+- Distinguish a newly reported incident from an update to an old one.
+
+The result may be days, months, or years old.
+It is the newest matching report listed in that archive,
+not necessarily the latest maritime incident worldwide.
+
+Repeated /latest commands may return the same link.
+Command replies do not use the automatic alert sending history.
+
+### Shared bot coordination
+
+Only ONE team member should run commands.py with the shared token.
+
+Other teammates can send /latest to the bot without running
+commands.py themselves.
+
+Do not run setup_telegram.py while commands.py is running.
+Stop the command listener first, complete setup one person at a
+time, and then restart it.
+
+bot.py sends alerts but does not listen for commands.
+commands.py listens for commands but does not run the scheduled
+RSS checks.
+
+To run both modes, use two terminals on the host computer:
+
+- Run bot.py in one terminal.
+- Run commands.py in the other.
+
+### Stopping the programs
+
+Press Control + C in each running terminal.
+
+The host computer must stay awake and connected to the internet.
+Closing a terminal stops the program running inside it.
 
 ## 12. Start it again another day
 
 Open the mcad-bot folder in VS Code and open a terminal.
 
-On macOS or Linux:
+On macOS or Linux, activate the environment:
 
 ```bash
 source .venv/bin/activate
 ```
 
+Then choose automatic alerts:
+
 ```bash
 python bot.py
 ```
 
-On Windows PowerShell:
+Or the command listener:
+
+```bash
+python commands.py
+```
+
+On Windows PowerShell, choose automatic alerts:
 
 ```powershell
 .\.venv\Scripts\python.exe bot.py
 ```
 
-You do not need to repeat the token or chat ID setup.
+Or the command listener:
+
+```powershell
+.\.venv\Scripts\python.exe commands.py
+```
+
+Only the designated host should start the shared command listener.
+
+You do not need to repeat Telegram setup.
 
 ## 13. Get project updates
 
@@ -622,18 +712,35 @@ The source may be temporarily unavailable or restricting requests.
 Stop the bot and ask for help checking sent_links.json.
 Deleting it can cause previously sent links to be sent again.
 
+### /latest does not reply
+
+Check that the designated host is running commands.py, not only bot.py.
+
+If the listener stopped, read the terminal error.
+
+If Telegram rejects requests, confirm that:
+
+- Only one copy of commands.py is running.
+- Nobody is running setup_telegram.py.
+- The shared token is current.
+
+If archive retrieval fails, try again later. The website may be
+unavailable, restrict requests, or have changed its layout.
+
 ## Project files
 
-| File              | Purpose                                       |
-| ----------------- | --------------------------------------------- |
-| bot.py            | Telegram sending, history, and regular checks |
-| news.py           | RSS feed reader                               |
-| filters.py        | Maritime keyword filtering                    |
-| setup_telegram.py | Personal chat ID setup                        |
-| requirements.txt  | Python dependencies                           |
-| .env.example      | Configuration placeholders                    |
-| .env              | Private configuration, excluded from Git      |
-| sent_links.json   | Local sent-link history, excluded from Git    |
+| File              | Purpose                                               |
+| ----------------- | ----------------------------------------------------- |
+| bot.py            | Sends Telegram messages and runs scheduled RSS checks |
+| commands.py       | Listens for /latest, /start, and /help                |
+| archive.py        | Retrieves matching reports from the Port news archive |
+| news.py           | Reads the recent RSS feed                             |
+| filters.py        | Filters RSS articles using maritime keywords          |
+| setup_telegram.py | Finds and saves your private chat ID                  |
+| requirements.txt  | Lists Python dependencies                             |
+| .env.example      | Configuration template with placeholders              |
+| .env              | Private settings, excluded from Git                   |
+| sent_links.json   | Automatic alert history, excluded from Git            |
 
 The history file is created after the first article link is sent.
 The connection test does not create it.
