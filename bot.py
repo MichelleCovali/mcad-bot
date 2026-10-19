@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -105,4 +106,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    print("MCAD bot started. Checking every 15 minutes.")
+    print("Press Control + C to stop.")
+
+    try:
+        while True:
+            main()
+            print("Waiting 15 minutes before the next check...")
+            time.sleep(15 * 60)
+    except KeyboardInterrupt:
+        print("\nMCAD bot stopped.")
