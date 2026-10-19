@@ -16,9 +16,11 @@ HISTORY_FILE = PROJECT_DIR / "sent_links.json"
 load_dotenv(PROJECT_DIR / ".env")
 
 
-def send_message(text):
+def send_message(text, destination_chat_id=None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    chat_id = str(
+        destination_chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+    ).strip()
 
     if not token or not chat_id:
         print("Missing Telegram token or chat ID in .env.")
