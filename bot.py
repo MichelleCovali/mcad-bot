@@ -1,12 +1,18 @@
+import json
 import os
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
+from filters import matching_keywords
+from news import fetch_articles
 
-# Read settings from the .env beside this file.
-load_dotenv(Path(__file__).resolve().parent / ".env")
+
+PROJECT_DIR = Path(__file__).resolve().parent
+HISTORY_FILE = PROJECT_DIR / "sent_links.json"
+
+load_dotenv(PROJECT_DIR / ".env")
 
 
 def send_message(text):
@@ -41,6 +47,62 @@ def send_message(text):
         return False
 
 
+def load_sent_links():
+    if not HISTORY_FILE.exists():
+        return set()
+
+    data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+
+    if not isinstance(data, list) or not all(
+        isinstance(link, str) for link in data
+    ):
+        raise ValueError("Invalid history format")
+
+    return set(data)
+
+
+def save_sent_links(links):
+    temporary_file = HISTORY_FILE.with_suffix(".tmp")
+    temporary_file.write_text(
+        json.dumps(sorted(links), indent=2),
+        encoding="utf-8",
+    )
+    temporary_file.replace(HISTORY_FILE)
+
+
+def main():
+    try:
+        sent_links = load_sent_links()
+    except (OSError, ValueError):
+        print("Could not read sending history. Stopping to avoid repeats.")
+        return
+
+    articles = fetch_articles()
+    sent_count = 0
+
+    for article in articles:
+        link = article["link"]
+
+        if not matching_keywords(article) or link in sent_links:
+            continue
+
+        if not send_message(link):
+            print("Stopping. The link was not marked as sent.")
+            break
+
+        sent_links.add(link)
+
+        try:
+            save_sent_links(sent_links)
+        except OSError:
+            print("Message sent, but history could not be saved. Stopping.")
+            return
+
+        sent_count += 1
+
+    print(f"Checked {len(articles)} articles.")
+    print(f"Sent {sent_count} new links.")
+
+
 if __name__ == "__main__":
-    if send_message("Your MCAD bot is running from VS Code!"):
-        print("Message sent successfully.")
+    main()
