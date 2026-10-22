@@ -2,7 +2,7 @@
 
 Date: 2026-10-22
 
-Current result: automated frontend checks and production build passed. Browser verification of the database-connected interface is tracked separately; the historical screenshots below do not verify the new integration. A successful Google Maps session has not been tested without an API key.
+Current result: automated checks, production build and local desktop/mobile browser checks passed. Current hosted evidence is recorded below; historical screenshots describe the earlier empty-map prototype. A successful Google Maps session has not been tested without an API key.
 
 ## Current implementation scope
 
@@ -31,6 +31,10 @@ The frontend data tests cover cancellation forwarding, HTTP/network/JSON/schema 
 
 The inspected build contains application JavaScript/CSS, original interface images/fonts, the app HTML and static deployment files. Incident records are requested at runtime; neither the supplied workbook nor local database files are bundled.
 
+## Current browser verification
+
+The coordinating task checked the database-connected interface in the in-app browser at the default 1280 × 720 viewport and a temporary 390 × 844 viewport, then restored the default. Verified real mapped/unmapped records, full original fields and references, a direct incident URL, marker popup to detail navigation, mobile filters/list/detail layout, and administrator login rejection/acceptance. A manual publication was tested only in a disposable local SQLite database; no QA fixture was published to production.
+
 ## Historical visual evidence
 
 These files document the original map-only prototype comparison on 2026-10-21. They are retained as evidence for its interface fidelity, not as captures of the current incident, detail or admin views.
@@ -48,7 +52,7 @@ Previously resolved visual findings included map height, a tile provider returni
 
 ## Remaining verification and limits
 
-- Complete current desktop/mobile browser checks for real record rendering, marker/cluster navigation, filtering, popup-to-detail navigation, incident deep links, stale/error feedback, dialog focus and protected admin forms. Browser QA belongs to the coordinating task.
+- Simulated refresh/network failure behavior is covered by data tests; no browser network fault injection or exhaustive keyboard/screen-reader audit was performed.
 - Verify visible marker count and popup persistence after pan, zoom and resize in a real Leaflet session. Automated cluster accounting establishes data retention, not browser accessibility behavior.
 - Google Maps initialization, markers, viewport refresh and fallback are implemented, but a successful Google path remains untested without the developer's own key/map ID. No source credentials were copied.
 - OpenStreetMap and Esri cartography differ from the source's Google map. Source interface assets and CSS are retained independently of the tile provider.
