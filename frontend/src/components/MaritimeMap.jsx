@@ -1,5 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import L from "leaflet";
+import { createIncidentIndex } from "../data/clusters.js";
+import { locationAccuracyLabel } from "../data/incidents.js";
 import "leaflet/dist/leaflet.css";
 
 const INITIAL_VIEW = { lat: 49.240831, lng: 12.627241, zoom: 5 };
@@ -155,7 +157,7 @@ function zoomLevel(value, fallback = INITIAL_VIEW.zoom) {
   return Number.isFinite(zoom) ? Math.min(20, Math.max(2, zoom)) : fallback;
 }
 
-function popupContent(incident) {
+function popupContent(incident, onSelectIncident) {
   const content = document.createElement("article");
   content.className = "incident-popup";
   const title = document.createElement("h3");
@@ -178,6 +180,42 @@ function popupContent(incident) {
     details.append(term, description);
   });
   content.appendChild(details);
+  if (incident.locationPrecision) {
+    const accuracy = document.createElement("p");
+    accuracy.className = "popup-accuracy";
+    accuracy.textContent = `Location: ${locationAccuracyLabel(incident.locationPrecision)}`;
+    content.appendChild(accuracy);
+  }
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "popup-more";
+  more.textContent = "More information";
+  more.addEventListener("click", () => onSelectIncident?.(incident));
+  content.appendChild(more);
+  return content;
+}
+
+function clusterContent(count) {
+  const content = document.createElement("span");
+  content.className = "clustericon";
+  content.textContent = String(count);
+  return content;
+}
+function clusterPopup(index, clusterId, onSelectIncident) {
+  const content = document.createElement("div");
+  content.className = "cluster-record-list";
+  const heading = document.createElement("h3");
+  heading.textContent = "Incidents at this location";
+  content.appendChild(heading);
+  index.getLeaves(clusterId, Infinity).forEach(({ properties }) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = properties.incident.title;
+    button.addEventListener("click", () =>
+      onSelectIncident?.(properties.incident),
+    );
+    content.appendChild(button);
+  });
   return content;
 }
 
@@ -204,7 +242,7 @@ function markerContent() {
   return pin;
 }
 
-function createLeafletMap(container, onError) {
+function createLeafletMap(container, onError, onSelectIncident) {
   const map = L.map(container, {
     center: [INITIAL_VIEW.lat, INITIAL_VIEW.lng],
     zoom: INITIAL_VIEW.zoom,
@@ -219,6 +257,87 @@ function createLeafletMap(container, onError) {
   const markers = L.layerGroup().addTo(map);
   let basemap;
   let currentLayer;
+  let index = createIncidentIndex([]);
+  let openPopupKey = null;
+  let rebuilding = false;
+  const renderMarkers = () => {
+    const bounds = map.getBounds().pad(0.05);
+    const west = bounds.getWest(),
+      east = bounds.getEast();
+    const wrap = (longitude) => ((((longitude + 180) % 360) + 360) % 360) - 180;
+    const bbox =
+      east - west >= 360
+        ? [-180, -90, 180, 90]
+        : [
+            wrap(west),
+            Math.max(-90, bounds.getSouth()),
+            wrap(east),
+            Math.min(90, bounds.getNorth()),
+          ];
+    const restoreKey = openPopupKey;
+    let restoreMarker = null;
+    const addVisibleMarker = (marker, key) => {
+      marker.on("popupopen", () => {
+        openPopupKey = key;
+      });
+      marker.on("popupclose", () => {
+        if (!rebuilding && openPopupKey === key) openPopupKey = null;
+      });
+      markers.addLayer(marker);
+      if (key === restoreKey && marker.getPopup()) restoreMarker = marker;
+    };
+    rebuilding = true;
+    markers.clearLayers();
+    index.getClusters(bbox, Math.floor(map.getZoom())).forEach((feature) => {
+      const [lng, lat] = feature.geometry.coordinates;
+      if (feature.properties.cluster) {
+        const { cluster_id: clusterId, point_count: count } =
+          feature.properties;
+        const marker = L.marker([lat, lng], {
+          title: `${count} incidents, zoom in`,
+          keyboard: true,
+          icon: L.divIcon({
+            className: "incident-cluster-pin",
+            html: clusterContent(count),
+            iconSize: [37, 37],
+            iconAnchor: [18.5, 18.5],
+          }),
+        });
+        const expansionZoom = index.getClusterExpansionZoom(clusterId);
+        if (expansionZoom > 20 || map.getZoom() >= 20) {
+          marker.bindPopup(clusterPopup(index, clusterId, onSelectIncident), {
+            maxWidth: 340,
+          });
+        } else
+          marker.on("click", () =>
+            map.flyTo([lat, lng], Math.min(expansionZoom, 20), {
+              duration: 0.5,
+            }),
+          );
+        addVisibleMarker(marker, `cluster:${clusterId}`);
+      } else {
+        const incident = feature.properties.incident;
+        const marker = L.marker([lat, lng], {
+          title: String(incident.title || "Incident"),
+          keyboard: true,
+          icon: L.divIcon({
+            className: "incident-map-pin",
+            html: markerContent(),
+            iconSize: [25, 25],
+            iconAnchor: [12.5, 12.5],
+          }),
+        });
+        marker.bindPopup(popupContent(incident, onSelectIncident), {
+          maxWidth: 320,
+        });
+        addVisibleMarker(marker, `incident:${incident.id}`);
+      }
+    });
+    rebuilding = false;
+    if (restoreMarker) restoreMarker.openPopup();
+    else openPopupKey = null;
+  };
+  map.on("zoomend moveend", renderMarkers);
   return {
     zoomIn: () => map.zoomIn(),
     zoomOut: () => map.zoomOut(),
@@ -252,24 +371,8 @@ function createLeafletMap(container, onError) {
       basemap.addTo(map);
     },
     setIncidents(incidents) {
-      markers.clearLayers();
-      incidents.forEach((incident) => {
-        if (!incident || typeof incident !== "object") return;
-        const position = coordinates(incident.latitude, incident.longitude);
-        if (!position) return;
-        const marker = L.marker([position.lat, position.lng], {
-          title: String(incident.title || "Incident"),
-          keyboard: true,
-          icon: L.divIcon({
-            className: "incident-map-pin",
-            html: markerContent(),
-            iconSize: [25, 25],
-            iconAnchor: [12.5, 12.5],
-          }),
-        });
-        marker.bindPopup(popupContent(incident), { maxWidth: 320 });
-        markers.addLayer(marker);
-      });
+      index = createIncidentIndex(incidents);
+      renderMarkers();
     },
     destroy() {
       basemap?.off("tileerror");
@@ -279,7 +382,7 @@ function createLeafletMap(container, onError) {
   };
 }
 
-function createGoogleMap(container, maps) {
+function createGoogleMap(container, maps, onSelectIncident) {
   const map = new maps.Map(container, {
     center: { lat: INITIAL_VIEW.lat, lng: INITIAL_VIEW.lng },
     zoom: INITIAL_VIEW.zoom,
@@ -294,14 +397,96 @@ function createGoogleMap(container, maps) {
   });
   const popup = new maps.InfoWindow();
   let markers = [];
-  const clearMarkers = () => {
-    popup.close();
+  const clearMarkers = (closePopup = true) => {
+    if (closePopup) popup.close();
     markers.forEach(({ marker, onClick }) => {
       marker.removeEventListener("gmp-click", onClick);
       marker.map = null;
     });
     markers = [];
   };
+  let googleIndex = createIncidentIndex([]);
+  let activeGooglePopupKey = null;
+  popup.addListener("closeclick", () => {
+    activeGooglePopupKey = null;
+  });
+  const renderGoogleMarkers = () => {
+    const restoreKey = activeGooglePopupKey;
+    let restore = null;
+    clearMarkers(false);
+    const bounds = map.getBounds();
+    if (!bounds) return;
+    const area = bounds.toJSON();
+    const bbox = [area.west, area.south, area.east, area.north];
+    googleIndex
+      .getClusters(bbox, Math.floor(map.getZoom() ?? INITIAL_VIEW.zoom))
+      .forEach((feature) => {
+        const [lng, lat] = feature.geometry.coordinates;
+        const cluster = feature.properties.cluster;
+        const incident = feature.properties.incident;
+        const key = cluster
+          ? `cluster:${feature.properties.cluster_id}`
+          : `incident:${incident.id}`;
+        const marker = new maps.marker.AdvancedMarkerElement({
+          map,
+          position: { lat, lng },
+          title: cluster
+            ? `${feature.properties.point_count} incidents, zoom in`
+            : incident.title,
+          gmpClickable: true,
+          anchorTop: "-50%",
+        });
+        marker.append(
+          cluster
+            ? clusterContent(feature.properties.point_count)
+            : markerContent(),
+        );
+        const onClick = () => {
+          if (cluster) {
+            const zoom = googleIndex.getClusterExpansionZoom(
+              feature.properties.cluster_id,
+            );
+            if (zoom <= 20 && (map.getZoom() ?? 5) < 20) {
+              activeGooglePopupKey = null;
+              popup.close();
+              map.panTo({ lat, lng });
+              map.setZoom(zoom);
+              return;
+            }
+            popup.setContent(
+              clusterPopup(
+                googleIndex,
+                feature.properties.cluster_id,
+                onSelectIncident,
+              ),
+            );
+          } else popup.setContent(popupContent(incident, onSelectIncident));
+          activeGooglePopupKey = key;
+          popup.open({ map, anchor: marker });
+        };
+        marker.addEventListener("gmp-click", onClick);
+        markers.push({ marker, onClick });
+        if (key === restoreKey)
+          restore = {
+            marker,
+            cluster,
+            incident,
+            clusterId: feature.properties.cluster_id,
+          };
+      });
+    if (restore) {
+      popup.setContent(
+        restore.cluster
+          ? clusterPopup(googleIndex, restore.clusterId, onSelectIncident)
+          : popupContent(restore.incident, onSelectIncident),
+      );
+      popup.open({ map, anchor: restore.marker });
+    } else {
+      activeGooglePopupKey = null;
+      popup.close();
+    }
+  };
+  map.addListener("idle", renderGoogleMarkers);
   return {
     zoomIn: () =>
       map.setZoom(zoomLevel((map.getZoom() ?? INITIAL_VIEW.zoom) + 1)),
@@ -319,29 +504,12 @@ function createGoogleMap(container, maps) {
     setLayer: (layer) =>
       map.setMapTypeId(layer === "satellite" ? "satellite" : "roadmap"),
     setIncidents(incidents) {
-      clearMarkers();
-      incidents.forEach((incident) => {
-        if (!incident || typeof incident !== "object") return;
-        const position = coordinates(incident.latitude, incident.longitude);
-        if (!position) return;
-        const marker = new maps.marker.AdvancedMarkerElement({
-          map,
-          position,
-          title: String(incident.title || "Incident"),
-          gmpClickable: true,
-          anchorTop: "-50%",
-        });
-        marker.append(markerContent());
-        const onClick = () => {
-          popup.setContent(popupContent(incident));
-          popup.open({ map, anchor: marker });
-        };
-        marker.addEventListener("gmp-click", onClick);
-        markers.push({ marker, onClick });
-      });
+      googleIndex = createIncidentIndex(incidents);
+      renderGoogleMarkers();
     },
     destroy() {
       clearMarkers();
+      maps.event.clearInstanceListeners(popup);
       maps.event.clearInstanceListeners(map);
       map.unbindAll();
       container.replaceChildren();
@@ -350,13 +518,19 @@ function createGoogleMap(container, maps) {
 }
 
 const MaritimeMap = forwardRef(function MaritimeMap(
-  { layer = "roadmap", incidents = [], onReady, onError },
+  { layer = "roadmap", incidents = [], onReady, onError, onSelectIncident },
   ref,
 ) {
   const containerRef = useRef(null);
   const adapterRef = useRef(null);
-  const latest = useRef({ layer, incidents, onReady, onError });
-  latest.current = { layer, incidents, onReady, onError };
+  const latest = useRef({
+    layer,
+    incidents,
+    onReady,
+    onError,
+    onSelectIncident,
+  });
+  latest.current = { layer, incidents, onReady, onError, onSelectIncident };
 
   useImperativeHandle(
     ref,
@@ -404,7 +578,12 @@ const MaritimeMap = forwardRef(function MaritimeMap(
       container.replaceChildren();
       if (reason)
         reportError(`${reason} The map is using OpenStreetMap instead.`);
-      install(createLeafletMap(container, reportError), "leaflet");
+      install(
+        createLeafletMap(container, reportError, (incident) =>
+          latest.current.onSelectIncident?.(incident),
+        ),
+        "leaflet",
+      );
     };
     if (GOOGLE_KEY) {
       loadGoogleMaps()
@@ -416,7 +595,12 @@ const MaritimeMap = forwardRef(function MaritimeMap(
                 "Google Maps rejected the API key or its website restrictions.",
               ),
             );
-            install(createGoogleMap(container, maps), "google");
+            install(
+              createGoogleMap(container, maps, (incident) =>
+                latest.current.onSelectIncident?.(incident),
+              ),
+              "google",
+            );
           } catch (error) {
             useLeaflet(
               error instanceof Error

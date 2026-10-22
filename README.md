@@ -1,21 +1,27 @@
-# MCAD Telegram Bot
+# MCAD: maritime cyber incident map and Telegram
 
-A university prototype that finds possible maritime cybersecurity
-reports on BleepingComputer and sends links through Telegram.
+The React map, FastAPI service and Telegram workers share one database.
+Historical Excel imports retain every source field and do not send alerts.
+New reports enter a review queue; publishing an incident updates the map and
+queues a message for subscribed Telegram chats.
 
-The companion [map frontend](frontend/README.md) runs independently from the
-Python bot. It includes no incident records by default and is ready for a
-separate database-backed API. Its setup and API contract are documented there.
+- [Hosted map](https://mcad-web-production.up.railway.app/)
+- [Administration](https://mcad-web-production.up.railway.app/admin)
+- [Hosting, local development and Telegram setup](docs/hosting.md)
+- [Workbook import and data model](docs/data-import.md)
+- [Backend configuration and API](mcad/README.md)
+- [Frontend development](frontend/README.md)
 
-It has two modes:
+The Docker deployment uses PostgreSQL. Local development can use SQLite.
+RSS keyword matches require human review before publication. Location and date
+precision from the original records are preserved.
 
-- Automatic alerts: checks the recent RSS feed every 15 minutes
-  and sends new matching links to your configured chat.
-- Telegram commands: replies to /latest with the newest matching
-  report listed in BleepingComputer’s Port news archive.
+## Legacy local prototype
 
-The prototype uses keyword filtering, not AI.
-All reports require human review.
+The instructions below describe the original standalone `bot.py` and
+`commands.py` scripts. For the hosted map and shared database, follow
+[the current setup](docs/hosting.md). Do not run the old command poller with
+the same Telegram token as the hosted service.
 
 ## Before starting
 

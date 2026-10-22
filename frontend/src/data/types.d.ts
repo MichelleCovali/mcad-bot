@@ -1,16 +1,24 @@
 export interface Incident {
   id: string;
   title: string;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   victimCountry: string;
   year: number | null;
   victimType: string;
   impactArea: string;
   incidentCountry: string;
   attackerCountry: string;
+  description: string;
+  dateText: string;
+  datePrecision: string;
+  locationName: string;
+  locationPrecision: string;
+  locationSource: string;
+  sourceUrl: string;
+  rawFields?: Record<string, unknown>;
+  sources?: Array<{ url: string; shortName?: string; rawText?: string }>;
 }
-
 export type IncidentFilterField =
   | "all"
   | "victimCountry"
@@ -19,11 +27,9 @@ export type IncidentFilterField =
   | "impactArea"
   | "incidentCountry"
   | "attackerCountry";
-
 export interface IncidentRequestOptions {
   signal?: AbortSignal;
 }
-
 export interface Place {
   id: string;
   label: string;

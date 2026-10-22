@@ -1,80 +1,56 @@
 # Design QA — MCAD map frontend
 
-Date: 2026-10-21
+Date: 2026-10-22
 
-final result: passed
+Current result: automated frontend checks and production build passed. Browser verification of the database-connected interface is tracked separately; the historical screenshots below do not verify the new integration. A successful Google Maps session has not been tested without an API key.
 
-Passed for the requested map frontend and the documented provider fallback. This is not a claim that OpenStreetMap has the same cartography as Google Maps, or that the original site's other pages have been cloned.
+## Current implementation scope
 
-## Evidence
+- The source map header, typography, assets, navigation labels, filters and map controls are retained. The visual source is https://maritimecybersecurity.nl/.
+- Published incidents load from the same-origin `/api`. The development proxy targets `http://127.0.0.1:8090`.
+- The map clusters incidents with recorded coordinates; incidents without coordinates remain searchable in List. Record totals distinguish mapped and unmapped records. Coordinates are not invented from victim countries.
+- List rows and marker popups open incident details, references, original source fields and import provenance. Source-coordinate accuracy is explicitly labelled approximate and not independently verified. Source formulas and markup are displayed as text; links accept HTTP(S) only.
+- `?incident=<id>` links select a record and, when mapped, move to its coordinates. These links support the backend's Telegram notification format.
+- The Report panel and `/admin` provide protected candidate approval, manual publishing and historical XLSX import. The user enters the bearer token for the session; it is not stored in local storage or bundled in the frontend. Historical import explicitly states that it does not send notifications.
+- The data hook refreshes every 45 seconds while visible and on focus/visibility changes. It cancels superseded requests and retains the last successful snapshot on refresh failure, with an explicit stale/error state.
+- Leaflet renders clusters within the visible bounds plus a 5% margin and updates after pan/zoom. Google uses its bounds and idle event. Both providers preserve a currently open visible popup when markers refresh. These interaction paths require browser QA; the production build verifies compilation only.
 
-- Visual source: https://maritimecybersecurity.nl/
-- Desktop source: `docs/qa/source-desktop-empty.png`, `docs/qa/source-desktop-filter.png`.
-- Desktop implementation: `docs/qa/implementation-desktop.png`, `docs/qa/implementation-desktop-filter.png`, `docs/qa/implementation-desktop-menu.png`.
-- Mobile source: `docs/qa/source-mobile.png`.
-- Mobile implementation: `docs/qa/implementation-mobile.png`, `docs/qa/implementation-mobile-filter.png`.
-- Full comparisons: `docs/qa/comparison-desktop.png`, `docs/qa/comparison-filter.png`, `docs/qa/comparison-mobile.png`.
-- Focused comparison: `docs/qa/comparison-header.png` contains both source and implementation headers at original scale.
-- CSS evidence: `docs/reference/original-main.css`, `docs/reference/original-map.css`.
+## Verification performed on 2026-10-22
 
-Desktop viewport and source/implementation raster: **1280 × 720 CSS px / 1280 × 720 pixels**. Mobile viewport and raster: **390 × 844 CSS px / 390 × 844 pixels**. Capture density is 1×; no scaling was used for individual screenshots. Contact sheets concatenate equal-density captures with a 28px caption strip.
-
-Desktop state: initial center 49.240831, 12.627241, zoom 5, empty search, no visible incident records. The source's records were hidden using its search control; data were not copied. Mobile source capture contains its original markers; those are intentionally absent from the implementation. The source's loaded mobile map obscured its search/navigation; the implementation keeps the source's intended responsive search and bottom navigation usable. Mobile is therefore a comparison of responsive structure and controls with these explicit content/stacking differences.
-
-## Required fidelity surfaces
-
-| Surface | Result |
+| Check | Result and scope |
 | --- | --- |
-| Typography | Original local Cera Round Pro 400/500/700. Header title, placeholder, filter text, sizes and desktop wrapping match the focused comparison. |
-| Spacing/layout | Source 100px desktop header, 31px horizontal padding, 76px logo, 50px controls, 32px desktop right margins, 225px filter, 171px navigation preserved. Mobile search margins are 25px, persistent bottom navigation matches source CSS, horizontal overflow absent at 390px. |
-| Colors/tokens | Source navy #282369 / #00294b, blue #005aaa, search #f2f7fb and selected filter #e62328 preserved. Cartographic colors differ by provider as documented. |
-| Images/icons | Original logo, search/filter/menu/zoom/layer/boat assets and favicons bundled locally. No substitute icon drawings or hotlinked source assets. Map providers supply runtime tiles with visible attribution. |
-| Copy/content | Main map title, controls and seven filter labels preserved. Real incidents omitted as requested. List, Info and Report are scoped local preview panels, not reproductions of source pages. |
+| `npm --prefix frontend test` | 21 checks passed, including five nested error cases. Tests use isolated fixtures and mocked requests. |
+| `npm --prefix frontend run build` | Passed. Vite transformed 42 modules and prepared the required Sites packaging outputs. |
+| `npm --prefix frontend run test:sites` | 4 checks passed: static assets, SPA route fallback, API/write exclusion from fallback, and packaging outputs. |
+| Read-only local API integration | `/api/incidents` passed the real frontend validator: 440 records, 426 mapped and 14 unmapped. API metadata agrees with these counts. |
+| Full-world cluster accounting | The real 440-record snapshot produced a cluster/point sum of 426, retaining every mapped record. Unmapped records remain in the validated dataset. |
+| One real incident detail | The first record returned 33 original non-internal fields and 5 source links. No source content was copied into static build inputs. |
+| Production artifact inspection | All 27 files inventoried; required `dist/client/index.html`, `dist/server/index.js` and `dist/.openai/hosting.json` are present. No workbook, CSV/TSV, database, environment, log, private-key or source-map files are present. Content scans found no database connection literals, Telegram token patterns, private-key material or test-fixture strings. |
 
-## Comparison history and resolved findings
+The frontend data tests cover cancellation forwarding, HTTP/network/JSON/schema failures, identifier/year/coordinate validation, paired nullable coordinates, preserving original fields and public provenance, safe reference URL protocols, selected-field filtering, local place aliases, bearer authorization, actionable authorization errors, retaining distinct co-located records, and authenticated raw-binary workbook upload with file type/size checks. They do not mount React or exercise real map-provider browser events, Telegram delivery or production deployment.
 
-1. **[P1] Zero-height map after initial integration.** The source CSS targeted `div#map`, while the semantic implementation uses `main#map`. Added an explicit `.map-stage` height; desktop map and all controls now occupy the source's proportions. Verified in the final desktop contact sheet.
-2. **[P1] Provider returned an error graphic with HTTP 200.** Browser capture exposed CARTO's API-key watermark. Replaced it with standard OpenStreetMap tiles and visually verified real map pixels. Final full-view comparisons use the working fallback.
-3. **[P2] Mobile hidden logo extended layout beyond viewport.** Increased selector specificity to remove the desktop brand group below 769px. Final mobile DOM reports `scrollWidth === innerWidth === 390`.
-4. **[P2] Mobile radio controls became elliptical.** Source-wide mobile input padding affected radio buttons. Scoped padding reset restores 19px circles; verified in `implementation-mobile-filter.png`.
-5. **[P2] Field autocomplete applied record titles to year/country filters.** Suggestions now use the selected field value; country navigation retains the country filter. Temporary API fixture verified Year=2024 and Victim country=Netherlands each retain only the matching record.
-6. **[P2] Layer attribution survived tile-layer removal.** Narrowed event cleanup to the app's tile-error listener, preserving Leaflet's attribution cleanup. Roadmap now shows OpenStreetMap attribution; satellite shows the imagery provider attribution.
+The inspected build contains application JavaScript/CSS, original interface images/fonts, the app HTML and static deployment files. Incident records are requested at runtime; neither the supplied workbook nor local database files are bundled.
 
-After these fixes the screenshots were captured again and compared together. No actionable P0/P1/P2 findings remain within the stated scope.
+## Historical visual evidence
 
-## Interaction and runtime verification
+These files document the original map-only prototype comparison on 2026-10-21. They are retained as evidence for its interface fidelity, not as captures of the current incident, detail or admin views.
 
-- Desktop navigation open/close; List view shows 0 records in the normal preview.
-- Local Info panel, modal focus, close button and Escape; Report explicitly indicates preview unavailability and sends nothing.
-- Seven radio filters, outside-click dismissal and keyboard focus.
-- Local country/city search, selection by ArrowDown/Enter, unknown-result state and clear action.
-- Escape removes a stale active suggestion reference.
-- Zoom in/out, drag to pan, reset through an empty search and switch between roadmap/satellite; actual imagery inspected in the browser.
-- Mobile 390 × 844 controls, filter panel, bottom navigation, Info close/Escape, no horizontal overflow.
-- Default empty data mode verified in the browser.
-- Isolated preview on port 4174 connected to a temporary API on port 4175. Two synthetic records loaded as markers; popup content, year filtering and country selection verified. Fixture data were never included in app defaults or an environment file.
-- Browser warning/error logs were empty in the normal and fixture previews.
-- Final normal desktop DOM: 1280 × 720, zero incident markers, 27 loaded tiles, no horizontal overflow. Temporary fixture servers were stopped; only the normal preview remains running.
-- Production build, 13 data-client/filter checks and 4 static-worker checks pass.
+- Desktop source: `docs/qa/source-desktop-empty.png`, `docs/qa/source-desktop-filter.png`.
+- Desktop prototype: `docs/qa/implementation-desktop.png`, `docs/qa/implementation-desktop-filter.png`, `docs/qa/implementation-desktop-menu.png`.
+- Mobile source: `docs/qa/source-mobile.png`.
+- Mobile prototype: `docs/qa/implementation-mobile.png`, `docs/qa/implementation-mobile-filter.png`.
+- Comparisons: `docs/qa/comparison-desktop.png`, `docs/qa/comparison-filter.png`, `docs/qa/comparison-mobile.png`, `docs/qa/comparison-header.png`.
+- Source CSS evidence: `docs/reference/original-main.css`, `docs/reference/original-map.css`.
 
-## Expected differences and limits
+Historical desktop captures use 1280 × 720 CSS pixels at 1× density; mobile captures use 390 × 844 at 1×. Contact sheets add a 28px caption strip. The original prototype desktop center was 49.240831, 12.627241 at zoom 5. Source records were hidden with its search control for the desktop comparison. Those captures predate database integration and depict an empty prototype map.
 
-- Exact Google cartography requires the developer's own Google Maps API key and, where appropriate, a configured map ID. No source credentials were copied. Google initialization/fallback is implemented but the successful Google path was not exercised without a key.
-- OpenStreetMap and Esri tile labels, colors, detail and imagery differ from the source. The UI geometry/assets match independently of this configured-provider difference.
-- Full incident pages, source List/Info/Report pages and report submission are outside this map-only implementation.
-- Future server persistence and production database integration remain separate work. The frontend API boundary is implemented and tested.
+Previously resolved visual findings included map height, a tile provider returning an error graphic, mobile overflow, radio dimensions, selected-field autocomplete and map-layer attribution cleanup. They were documented in the prior report; no browser recapture is claimed by this automated verification pass.
 
-## Follow-up polish
+## Remaining verification and limits
 
-- [P3] The source capture's selected radio appears slightly lighter than its CSS token; implementation follows the actual #e62328 token.
-- [P3] Local search intentionally covers a small European gazetteer. A future geocoder can extend place coverage without changing the map UI.
-
-## Implementation checklist
-
-- [x] Bundle original interface assets and fonts.
-- [x] Keep default map free of incident records.
-- [x] Implement map controls, search and filters.
-- [x] Isolate validated API access for future database data.
-- [x] Compare source and rendered implementation together.
-- [x] Verify desktop/mobile and temporary API integration.
-- [x] Keep the normal local preview running.
+- Complete current desktop/mobile browser checks for real record rendering, marker/cluster navigation, filtering, popup-to-detail navigation, incident deep links, stale/error feedback, dialog focus and protected admin forms. Browser QA belongs to the coordinating task.
+- Verify visible marker count and popup persistence after pan, zoom and resize in a real Leaflet session. Automated cluster accounting establishes data retention, not browser accessibility behavior.
+- Google Maps initialization, markers, viewport refresh and fallback are implemented, but a successful Google path remains untested without the developer's own key/map ID. No source credentials were copied.
+- OpenStreetMap and Esri cartography differ from the source's Google map. Source interface assets and CSS are retained independently of the tile provider.
+- Local place search uses a small European gazetteer. Incident records may be worldwide; this lookup is not a global geocoder.
+- Backend persistence, silent import transaction behavior, production deployment and actual Telegram delivery require their respective backend/deployment checks. The frontend's neutral save message does not claim that a notification was sent.
