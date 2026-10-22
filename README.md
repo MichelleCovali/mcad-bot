@@ -3,6 +3,10 @@
 A university prototype that finds possible maritime cybersecurity
 reports on BleepingComputer and sends links through Telegram.
 
+The companion [map frontend](frontend/README.md) runs independently from the
+Python bot. It includes no incident records by default and is ready for a
+separate database-backed API. Its setup and API contract are documented there.
+
 It has two modes:
 
 - Automatic alerts: checks the recent RSS feed every 15 minutes
