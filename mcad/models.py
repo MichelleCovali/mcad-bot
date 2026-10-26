@@ -161,6 +161,9 @@ class Candidate(Base):
     baseline: Mapped[bool] = mapped_column(Boolean, default=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rejection_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 
 class Subscriber(Base):
