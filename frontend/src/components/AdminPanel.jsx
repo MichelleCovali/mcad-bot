@@ -42,6 +42,9 @@ export function AdminPanel({ onChanged }) {
   const [selected, setSelected] = useState(null);
   const [values, setValues] = useState({});
   const [busy, setBusy] = useState(false);
+  const [showRejectForm, setShowRejectForm] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [rejectionNotes, setRejectionNotes] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [workbook, setWorkbook] = useState(null);
@@ -66,6 +69,9 @@ export function AdminPanel({ onChanged }) {
   }
   function choose(candidate) {
     setSelected(candidate);
+    setShowRejectForm(false);
+    setRejectionReason("");
+    setRejectionNotes("");
     setValues(
       candidate
         ? {
@@ -137,6 +143,37 @@ export function AdminPanel({ onChanged }) {
       setBusy(false);
     }
   }
+
+  
+  async function rejectCandidate() {
+    if (!selected || !rejectionReason || busy) return;
+
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      await client.reject(selected.id, {
+        reason: rejectionReason,
+        notes: rejectionNotes,
+      });
+
+      setCandidates(await client.candidates());
+
+      setSelected(null);
+      setValues({});
+      setShowRejectForm(false);
+      setRejectionReason("");
+      setRejectionNotes("");
+
+      setMessage("Incident rejected. Feedback saved successfully.");
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function importWorkbook(event) {
     event.preventDefault();
     setError("");
@@ -378,6 +415,78 @@ export function AdminPanel({ onChanged }) {
           <button className="primary-action" type="submit" disabled={busy}>
             {busy ? "Publishing…" : "Publish verified incident"}
           </button>
+          
+          {selected && (
+            <>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={busy}
+                onClick={() => setShowRejectForm(!showRejectForm)}
+              >
+                {showRejectForm ? "Cancel rejection" : "Reject incident"}
+              </button>
+
+              {showRejectForm && (
+                <div className="rejection-form">
+                  <h3>Reject incident</h3>
+
+                  <label>
+                    Reason for rejection *
+                    <select
+                      value={rejectionReason}
+                      onChange={(event) =>
+                        setRejectionReason(event.target.value)
+                      }
+                    >
+                      <option value="">Select a reason</option>
+                      <option value="not_maritime">
+                        Not maritime-related
+                      </option>
+                      <option value="not_cyber">
+                        Not a cybersecurity incident
+                      </option>
+                      <option value="duplicate">
+                        Duplicate incident
+                      </option>
+                      <option value="insufficient_evidence">
+                        Insufficient evidence
+                      </option>
+                      <option value="incorrect_information">
+                        Incorrect information
+                      </option>
+                      <option value="other">
+                        Other
+                      </option>
+                    </select>
+                  </label>
+
+                  <label>
+                    Additional explanation
+                    <textarea
+                      rows={3}
+                      maxLength={2000}
+                      value={rejectionNotes}
+                      onChange={(event) =>
+                        setRejectionNotes(event.target.value)
+                      }
+                      placeholder="Explain why this incident was rejected..."
+                    />
+                  </label>
+
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    disabled={busy || !rejectionReason}
+                    onClick={rejectCandidate}
+                  >
+                    {busy ? "Rejecting..." : "Confirm rejection"}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
         </form>
       )}
     </div>

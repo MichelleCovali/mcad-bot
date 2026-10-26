@@ -298,6 +298,11 @@ export function createAdminClient(
         method: "POST",
         body: record,
       }),
+    reject: (id, feedback) =>
+      request(`/admin/candidates/${encodeURIComponent(id)}/reject`, {
+        method: "POST",
+        body: feedback,
+      }),
     importWorkbook: async (file, { signal } = {}) => {
       if (
         !file ||
