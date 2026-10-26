@@ -1,11 +1,15 @@
 """Versioned schema migrations; never change an already deployed migration."""
+
 from sqlalchemy import select, text
 
 from mcad.models import SchemaVersion, utcnow
 from .v0001_initial import upgrade as initial_schema
+from .v0002_candidate_feedback import upgrade as candidate_feedback
 
-MIGRATIONS = [(1, initial_schema)]
-
+MIGRATIONS = [
+    (1, initial_schema),
+    (2, candidate_feedback),
+]
 
 def migrate(engine):
     with engine.begin() as connection:
