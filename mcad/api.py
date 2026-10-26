@@ -155,6 +155,71 @@ def create_app(settings=None, engine=None):
             result = incident_dict(incident, details=True)
         return result
 
+    
+    
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/reject",
+        dependencies=[Depends(require_admin)]
+    )
+    def reject_candidate(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency)
+    ):
+        allowed_reasons = {
+            "not_maritime",
+            "not_cyber",
+            "duplicate",
+            "insufficient_evidence",
+            "incorrect_information",
+            "other",
+        }
+
+        reason = payload.get("reason")
+        notes = payload.get("notes", "")
+
+        if not isinstance(reason, str) or reason not in allowed_reasons:
+            raise HTTPException(
+                422,
+                "A valid rejection reason is required."
+            )
+
+        if not isinstance(notes, str) or len(notes) > 2000:
+            raise HTTPException(
+                422,
+                "Notes must be text of at most 2000 characters."
+            )
+
+        with session.begin():
+            candidate = session.scalar(
+                select(Candidate)
+                .where(Candidate.id == candidate_id)
+                .with_for_update()
+            )
+
+            if candidate is None:
+                raise HTTPException(
+                    404, "Candidate not found."
+                )
+
+            if candidate.status != "pending":
+                raise HTTPException(
+                    409,
+                    "Only pending candidates can be rejected."
+                )
+
+            candidate.status = "rejected"
+            candidate.rejection_reason = reason
+            candidate.rejection_notes = notes.strip()
+
+        return {
+            "message": "Candidate rejected successfully",
+            "candidate_id": candidate_id,
+            "status": "rejected",
+            "reason": reason,
+            "notes": notes.strip()
+        }
+
     @app.post("/api/admin/import-workbook", dependencies=[Depends(require_admin)])
     async def import_workbook_file(request: Request):
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
