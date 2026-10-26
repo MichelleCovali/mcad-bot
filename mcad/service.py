@@ -255,7 +255,17 @@ def incident_dict(incident, details=False):
 
 
 def candidate_dict(candidate):
-    return {"id": candidate.id, "title": candidate.title, "sourceUrl": candidate.source_url,
-            "summary": candidate.summary, "matchedKeywords": candidate.matched_keywords,
-            "status": candidate.status, "baseline": candidate.baseline,
-            "firstSeenAt": iso(candidate.first_seen_at), "incidentId": candidate.incident_id}
+    return {
+        "id": candidate.id,
+        "title": candidate.title,
+        "sourceUrl": candidate.source_url,
+        "summary": candidate.summary,
+        "matchedKeywords": candidate.matched_keywords,
+        "status": candidate.status,
+        "baseline": candidate.baseline,
+        "firstSeenAt": iso(candidate.first_seen_at),
+        "incidentId": candidate.incident_id,
+        "rejectionReason": candidate.rejection_reason,
+        "rejectionNotes": candidate.rejection_notes,
+    }
+
