@@ -484,7 +484,9 @@ It does not send anything to Telegram.
 
 ## 11. Choose how to run the bot
 
-There are two separate programs. Choose the mode you want to use.
+There are two original programs, plus an optional review digest
+on this branch. The original alert and command programs are
+unchanged. Choose the mode you want to use.
 
 ### Option A — Automatic alerts
 
@@ -565,6 +567,50 @@ not necessarily the latest maritime incident worldwide.
 
 Repeated /latest commands may return the same link.
 Command replies do not use the automatic alert sending history.
+
+### Option C — Review digest (this branch)
+
+Sends one Telegram message that lists current RSS matches for
+human review. It does not replace bot.py or commands.py.
+
+It uses the recent RSS feed, not the Port tag archive.
+
+A dual-evidence candidate has:
+
+- At least one maritime keyword (the same list as filters.py)
+- At least one incident word (the same list as archive.py)
+
+The digest also lists maritime-only hits. Those are the articles
+the original automatic alerts would consider. They are shown
+separately so you can compare the stricter rule without changing
+the running alert bot.
+
+This program uses sendMessage only. It does not listen for
+Telegram commands, so it does not compete with commands.py.
+
+On macOS or Linux, with the virtual environment activated:
+
+```bash
+python digest.py
+```
+
+On Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe digest.py
+```
+
+You can also inspect the matcher locally without sending:
+
+```bash
+python evidence.py
+```
+
+The digest is a snapshot of the current RSS window. Repeating
+it can send the same links again. It does not write sent_links.json.
+
+Zero dual-evidence matches is normal when the recent feed has
+no overlapping maritime and incident wording.
 
 ### Shared bot coordination
 
@@ -734,6 +780,8 @@ unavailable, restrict requests, or have changed its layout.
 | bot.py            | Sends Telegram messages and runs scheduled RSS checks |
 | commands.py       | Listens for /latest, /start, and /help                |
 | archive.py        | Retrieves matching reports from the Port news archive |
+| evidence.py       | Combines maritime keywords with incident words        |
+| digest.py         | Sends a one-shot RSS review digest to Telegram        |
 | news.py           | Reads the recent RSS feed                             |
 | filters.py        | Filters RSS articles using maritime keywords          |
 | setup_telegram.py | Finds and saves your private chat ID                  |
@@ -758,6 +806,9 @@ The connection test does not create it.
 - macOS has been tested; Windows and Linux still need team testing.
 
 Every candidate requires human review before inclusion in MCAD.
+
+The review digest on this branch is a stricter snapshot. It does
+not change automatic alerts or /latest.
 
 ## Shared token
 

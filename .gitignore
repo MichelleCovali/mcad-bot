@@ -2,3 +2,4 @@
 .env
 __pycache__/
 sent_links.json
+.DS_Store
