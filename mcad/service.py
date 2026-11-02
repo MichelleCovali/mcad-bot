@@ -267,5 +267,10 @@ def candidate_dict(candidate):
         "incidentId": candidate.incident_id,
         "rejectionReason": candidate.rejection_reason,
         "rejectionNotes": candidate.rejection_notes,
+        "origin": getattr(candidate, "origin", "rss"),
+        "proposedFields": getattr(candidate, "proposed_fields", None) or {},
+        "evidence": getattr(candidate, "evidence", None) or {},
+        "verificationStatus": getattr(candidate, "verification_status", "unreviewed"),
+        "aiRunId": getattr(candidate, "ai_run_id", None),
     }
 

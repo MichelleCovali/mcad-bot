@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from openpyxl.utils.exceptions import InvalidFileException
 from fastapi.middleware.gzip import GZipMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import Settings
@@ -91,6 +91,9 @@ def create_app(settings=None, engine=None):
             "incidents": {"total": total, "mapped": mapped, "unmapped": total - mapped},
             "imports": {"batches": session.scalar(select(func.count()).select_from(ImportBatch)),
                         "lastImportedAt": iso(session.scalar(select(func.max(ImportBatch.created_at))))},
+            "ai": {"serverEnabled": settings.enable_ai_search,
+                   "configured": bool(settings.openai_api_key),
+                   "automaticPublication": False},
         }
 
     @app.get("/api/incidents")
@@ -128,13 +131,26 @@ def create_app(settings=None, engine=None):
 
     @app.get("/api/admin/candidates", dependencies=[Depends(require_admin)])
     def list_candidates(status: str = "pending", session=Depends(session_dependency)):
-        if status not in {"pending", "approved", "all"}:
-            raise HTTPException(422, "status must be pending, approved or all")
+        if status not in {"pending", "approved", "rejected", "all"}:
+            raise HTTPException(422, "status must be pending, approved, rejected or all")
         query = select(Candidate).order_by(Candidate.first_seen_at.desc())
         if status != "all":
             query = query.where(Candidate.status == status)
         candidates = list(session.scalars(query))
         return {"items": [candidate_dict(candidate) for candidate in candidates], "meta": {"total": len(candidates)}}
+
+    @app.get("/api/admin/catalogs", dependencies=[Depends(require_admin)])
+    def workbook_catalogs(session=Depends(session_dependency)):
+        from .import_workbook import SOURCE_FIELDS
+        from .service import camel_case
+        batch = session.scalar(select(ImportBatch).order_by(ImportBatch.created_at.desc(), ImportBatch.id).limit(1))
+        catalogs = (batch.metadata_json or {}).get("catalogs", {}) if batch else {}
+        return {
+            "fields": [{"sourceHeader": header, "key": camel_case(key)} for header, key in SOURCE_FIELDS.items()],
+            "catalogs": {key: catalogs.get(key, []) for key in ("countries", "impact_areas", "methods", "victim_types")},
+            "sourceName": batch.source_name if batch else None,
+            "importBatchId": batch.id if batch else None,
+        }
 
     @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
     def approve_candidate(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
@@ -144,19 +160,38 @@ def create_app(settings=None, engine=None):
                 raise HTTPException(404, "Candidate not found.")
             if candidate.status == "approved" and candidate.incident_id:
                 return incident_dict(session.get(Incident, candidate.incident_id), details=True)
+            if candidate.status != "pending":
+                raise HTTPException(409, "Only pending candidates can be approved.")
             if not isinstance(payload.get("title"), str) or not payload["title"].strip():
                 raise ValueError("A human-verified title is required for approval")
+            # The row lock is used by PostgreSQL. The conditional transition also
+            # protects against stale requests where SELECT FOR UPDATE is absent.
+            changed = session.execute(update(Candidate).where(
+                Candidate.id == candidate_id, Candidate.status == "pending"
+            ).values(status="approved").execution_options(synchronize_session=False))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
             approved = dict(payload)
             approved["status"] = "published"
             approved.setdefault("sourceUrl", candidate.source_url)
             approved.setdefault("description", candidate.summary)
+            if getattr(candidate, "origin", "rss") == "ai":
+                raw_fields = approved.get("rawFields", approved.get("raw_fields", {}))
+                if not isinstance(raw_fields, dict):
+                    raise ValueError("raw_fields must be an object")
+                approved.pop("raw_fields", None)
+                approved["rawFields"] = {**raw_fields, "_aiReview": {
+                    "candidateId": candidate.id,
+                    "runId": getattr(candidate, "ai_run_id", None),
+                    "verificationStatus": getattr(candidate, "verification_status", "unreviewed"),
+                    "evidence": getattr(candidate, "evidence", None) or {},
+                    "proposedFields": getattr(candidate, "proposed_fields", None) or {},
+                }}
             incident, _ = upsert_incident(session, approved, notify=True)
             candidate.status, candidate.incident_id = "approved", incident.id
             result = incident_dict(incident, details=True)
         return result
 
-    
-    
     @app.post(
         "/api/admin/candidates/{candidate_id}/reject",
         dependencies=[Depends(require_admin)]
@@ -208,6 +243,12 @@ def create_app(settings=None, engine=None):
                     "Only pending candidates can be rejected."
                 )
 
+            changed = session.execute(update(Candidate).where(
+                Candidate.id == candidate_id, Candidate.status == "pending"
+            ).values(status="rejected", rejection_reason=reason, rejection_notes=notes.strip())
+                .execution_options(synchronize_session=False))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
             candidate.status = "rejected"
             candidate.rejection_reason = reason
             candidate.rejection_notes = notes.strip()
@@ -219,6 +260,29 @@ def create_app(settings=None, engine=None):
             "reason": reason,
             "notes": notes.strip()
         }
+
+    @app.get("/api/admin/ai-monitor", dependencies=[Depends(require_admin)])
+    def ai_monitor_status():
+        from .ai_monitor import get_monitor_status
+        return get_monitor_status(factory, settings)
+
+    @app.patch("/api/admin/ai-monitor", dependencies=[Depends(require_admin)])
+    def configure_ai_monitor(payload: dict = Body(...)):
+        from .ai_monitor import AIUnavailable, update_monitor_settings
+        try:
+            return update_monitor_settings(factory, settings, payload)
+        except AIUnavailable as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/api/admin/ai-monitor/runs", dependencies=[Depends(require_admin)])
+    def request_ai_run():
+        from .ai_monitor import AIUnavailable, run_monitor_once
+        try:
+            # A sync FastAPI endpoint runs in its thread pool. Merely reading or
+            # saving settings never calls this entry point or the Responses API.
+            return run_monitor_once(factory, settings, trigger="manual")
+        except AIUnavailable as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.post("/api/admin/import-workbook", dependencies=[Depends(require_admin)])
     async def import_workbook_file(request: Request):

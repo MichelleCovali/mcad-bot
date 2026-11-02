@@ -1,10 +1,16 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createAdminClient, safeReferenceUrl } from "../data/incidents.js";
+import { candidateDraft, reviewedIncidentPayload, REJECTION_PUBLICATION_BLOCK, submitReviewedIncident } from "../data/review.js";
+import { AIMonitorSettings } from "./AIMonitorSettings.jsx";
 
 const fields = [
   ["title", "Title", true],
-  ["description", "Summary", false, "textarea"],
+  ["summary", "Summary", false, "textarea"],
+  ["qa", "QA"],
+  ["referenceNumber", "Reference number"],
+  ["month", "Month (blank if unknown)", false, "number"],
   ["year", "Year", false, "number"],
+  ["yearEnd", "Ending year (blank if same year)", false, "number"],
   ["dateText", "Date as reported"],
   ["incidentCountry", "Incident country"],
   ["locationName", "Incident location"],
@@ -17,9 +23,14 @@ const fields = [
   ["impactArea", "Impact area"],
   ["attackerCountry", "Threat actor country"],
   ["sourceUrl", "Reference URL", false, "url"],
+  ["referenceUrlsText", "All reference URLs (one per line)", false, "textarea"],
+  ["referenceShort", "Reference short", false, "textarea"],
+  ["coordinatesRaw", "Original coordinate text (as reported)"],
+  ["googleMapLocation", "Google Map Location", false, "url"],
 ];
 const classification = [
   ["victimIdentity", "Victim identity"],
+  ["victimTypeShort", "Victim type short"],
   ["affectedSystem", "Affected system"],
   ["method", "Method"],
   ["socialEngineeringTechnique", "Social engineering technique"],
@@ -27,18 +38,58 @@ const classification = [
   ["ransomwareType", "Ransomware type"],
   ["attackPattern", "Attack pattern"],
   ["motive", "Motive"],
+  ["motiveShort", "Motive short"],
   ["campaign", "Campaign"],
   ["impact", "Impact"],
+  ["impactShort", "Impact short"],
   ["countermeasures", "Countermeasures"],
   ["threatActor", "Threat actor"],
   ["additionalInfo", "Additional information"],
 ];
+const rejectionLabels = {
+  not_maritime: "Not maritime-related", not_cyber: "Not a cybersecurity incident",
+  duplicate: "Duplicate incident", insufficient_evidence: "Insufficient evidence",
+  incorrect_information: "Incorrect information", other: "Other",
+};
+const catalogFields = {
+  incidentCountry: "countries", victimCountry: "countries", attackerCountry: "countries",
+  victimType: "victim_types", impactArea: "impact_areas", method: "methods",
+};
+
+function EvidenceDetails({ candidate }) {
+  const evidence = candidate.evidence;
+  if (!evidence || typeof evidence !== "object" || !Object.keys(evidence).length) return null;
+  const statuses = { supported: "Sources found — human review required", needs_review: "Further evidence needed", contradicted: "Conflicting reports" };
+  return <section className="candidate-evidence">
+    <h3>Source checks</h3>
+    <p><strong>{statuses[candidate.verificationStatus] || "Not independently verified"}</strong></p>
+    {typeof evidence.assessment === "string" && <p>{evidence.assessment}</p>}
+    <p className="admin-help">Source independence and supporting statements below are model assessments. Open the original reports and check them before publishing.</p>
+    <dl className="detail-fields">
+      {[["Checked", evidence.checkedAt], ["First reported", evidence.firstReportedAt], ["Event date", evidence.eventDate]].map(([label, value]) => value && <div className="detail-field" key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}
+    </dl>
+    <ul>
+      {Array.isArray(evidence.sources) && evidence.sources.map((source, index) => <li key={`${source.url}-${index}`}>
+        {safeReferenceUrl(source.url) ? <a href={safeReferenceUrl(source.url)} target="_blank" rel="noopener noreferrer">{source.title || source.url}</a> : <strong>Source link unavailable</strong>}
+        <p>{source.publisher || "Publisher unknown"} · Independence group: {source.independenceGroup || "unknown"}{source.isPrimary === true ? " · Reported primary source" : ""}</p>
+        {source.snippet && <blockquote>{String(source.snippet)}</blockquote>}
+        {source.supports && <p>Supports: {Array.isArray(source.supports) ? source.supports.join("; ") : String(source.supports)}</p>}
+        {source.contradicts && <p>Contradicts: {Array.isArray(source.contradicts) ? source.contradicts.join("; ") : String(source.contradicts)}</p>}
+      </li>)}
+    </ul>
+    {[ ["Uncertainties", evidence.uncertainties], ["Contradictions", evidence.contradictions] ].map(([label, items]) => Array.isArray(items) && items.length > 0 && <div key={label}><h4>{label}</h4><ul>{items.map((item, index) => <li key={index}>{String(item)}</li>)}</ul></div>)}
+  </section>;
+}
 export function AdminPanel({ onChanged }) {
   const tokenInput = useRef(null);
   const fileInput = useRef(null);
+  const queueRequest = useRef(null);
   const [token, setToken] = useState("");
   const [client, setClient] = useState(null);
   const [candidates, setCandidates] = useState([]);
+  const [queueStatus, setQueueStatus] = useState("pending");
+  const [catalogs, setCatalogs] = useState({});
+  const [catalogError, setCatalogError] = useState("");
   const [selected, setSelected] = useState(null);
   const [values, setValues] = useState({});
   const [busy, setBusy] = useState(false);
@@ -49,6 +100,20 @@ export function AdminPanel({ onChanged }) {
   const [message, setMessage] = useState("");
   const [workbook, setWorkbook] = useState(null);
   const [importReport, setImportReport] = useState(null);
+  useEffect(() => {
+    if (!client) return;
+    const controller = new AbortController();
+    client.catalogs({ signal: controller.signal }).then((result) => {
+      if (!controller.signal.aborted) {
+        setCatalogs(result.catalogs ?? {});
+        setCatalogError("");
+      }
+    }).catch(() => {
+      if (!controller.signal.aborted) setCatalogError("Workbook suggestions are unavailable. You can still enter the reported values.");
+    });
+    return () => controller.abort();
+  }, [client]);
+  useEffect(() => () => queueRequest.current?.abort(), []);
   async function login(event) {
     event.preventDefault();
     setBusy(true);
@@ -58,6 +123,7 @@ export function AdminPanel({ onChanged }) {
       const connection = createAdminClient(token);
       const records = await connection.candidates();
       setCandidates(records);
+      setQueueStatus("pending");
       setClient(connection);
       setToken("");
     } catch (failure) {
@@ -72,62 +138,46 @@ export function AdminPanel({ onChanged }) {
     setShowRejectForm(false);
     setRejectionReason("");
     setRejectionNotes("");
-    setValues(
-      candidate
-        ? {
-            title: candidate.title,
-            description: candidate.summary,
-            sourceUrl: candidate.sourceUrl,
-            locationPrecision: "unknown",
-          }
-        : { locationPrecision: "unknown" },
-    );
+    setValues(candidateDraft(candidate));
     setMessage("");
     setError("");
   }
+  async function changeQueue(status) {
+    queueRequest.current?.abort();
+    const controller = new AbortController();
+    queueRequest.current = controller;
+    setBusy(true);
+    setError("");
+    try {
+      const rows = await client.candidates({ status, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      setCandidates(rows);
+      setQueueStatus(status);
+      choose(null);
+      setValues({});
+    } catch (failure) {
+      if (!controller.signal.aborted) setError(failure.message);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
+  async function refreshAfterSave() {
+    try { setCandidates(await client.candidates({ status: queueStatus })); }
+    catch (failure) { setError(`Your change was saved, but the report list could not refresh. ${failure.message}`); }
+  }
   async function publish(event) {
     event.preventDefault();
+    if (busy || (selected && selected.status !== "pending")) return;
+    if (showRejectForm) return setError(REJECTION_PUBLICATION_BLOCK);
     setError("");
     setMessage("");
-    const payload = Object.fromEntries(
-      Object.entries(values).filter(([, value]) => String(value).trim() !== ""),
-    );
-    if (!payload.title?.trim())
-      return setError("Enter a verified incident title.");
-    for (const field of ["year", "latitude", "longitude"])
-      if (payload[field] != null) payload[field] = Number(payload[field]);
-    const hasLat = payload.latitude !== undefined,
-      hasLng = payload.longitude !== undefined;
-    if (hasLat !== hasLng)
-      return setError(
-        "Supply both latitude and longitude, or leave both blank.",
-      );
-    if (
-      (hasLat &&
-        (!Number.isFinite(payload.latitude) ||
-          Math.abs(payload.latitude) > 90)) ||
-      (hasLng &&
-        (!Number.isFinite(payload.longitude) ||
-          Math.abs(payload.longitude) > 180))
-    )
-      return setError("Enter valid latitude and longitude.");
-    if (payload.sourceUrl && !safeReferenceUrl(payload.sourceUrl))
-      return setError("Use an HTTP or HTTPS reference URL.");
-    payload.latitude ??= null;
-    payload.longitude ??= null;
-    if (!hasLat) payload.locationPrecision = "unknown";
-    else if (
-      !payload.locationPrecision ||
-      payload.locationPrecision === "unknown"
-    )
-      return setError(
-        "Specify the location accuracy of the supplied coordinates.",
-      );
+    let payload;
+    try { payload = reviewedIncidentPayload(values); }
+    catch (failure) { return setError(failure.message); }
+    const hasLat = payload.latitude !== null;
     setBusy(true);
     try {
-      const result = selected
-        ? await client.approve(selected.id, payload)
-        : await client.create(payload);
+      const result = await submitReviewedIncident(client, { candidate: selected, payload, rejectionOpen: showRejectForm });
       setMessage(
         hasLat
           ? "Incident saved. The map is updating."
@@ -135,8 +185,10 @@ export function AdminPanel({ onChanged }) {
       );
       setSelected(null);
       setValues({});
-      setCandidates(await client.candidates());
-      onChanged(result);
+      if (selected) setCandidates((rows) => rows.filter((row) => row.id !== selected.id));
+      // Reset the completed report before any fallible refresh can leave stale actions.
+      onChanged?.(result);
+      await refreshAfterSave();
     } catch (failure) {
       setError(failure.message);
     } finally {
@@ -144,9 +196,8 @@ export function AdminPanel({ onChanged }) {
     }
   }
 
-  
   async function rejectCandidate() {
-    if (!selected || !rejectionReason || busy) return;
+    if (!selected || selected.status !== "pending" || !rejectionReason || busy) return;
 
     setBusy(true);
     setError("");
@@ -158,8 +209,7 @@ export function AdminPanel({ onChanged }) {
         notes: rejectionNotes,
       });
 
-      setCandidates(await client.candidates());
-
+      setCandidates((rows) => rows.filter((row) => row.id !== selected.id));
       setSelected(null);
       setValues({});
       setShowRejectForm(false);
@@ -167,6 +217,7 @@ export function AdminPanel({ onChanged }) {
       setRejectionNotes("");
 
       setMessage("Incident rejected. Feedback saved successfully.");
+      await refreshAfterSave();
     } catch (failure) {
       setError(failure.message);
     } finally {
@@ -188,13 +239,14 @@ export function AdminPanel({ onChanged }) {
       setMessage(
         "Workbook import complete. Historical records were imported without sending notifications.",
       );
-      onChanged(report);
+      onChanged?.(report);
     } catch (failure) {
       setError(failure.message);
     } finally {
       setBusy(false);
     }
   }
+  const readOnly = Boolean(selected && selected.status !== "pending");
   if (!client)
     return (
       <div className="admin-panel">
@@ -229,7 +281,7 @@ export function AdminPanel({ onChanged }) {
   return (
     <div className="admin-panel">
       <div className="admin-toolbar">
-        <p>{candidates.length} reports awaiting review</p>
+        <p>{candidates.length} {queueStatus} reports</p>
         <button
           type="button"
           onClick={() => {
@@ -239,6 +291,9 @@ export function AdminPanel({ onChanged }) {
             setSelected(null);
             setWorkbook(null);
             setImportReport(null);
+            setCatalogs({});
+            setCatalogError("");
+            queueRequest.current?.abort();
           }}
         >
           Sign out
@@ -254,6 +309,7 @@ export function AdminPanel({ onChanged }) {
           {message}
         </p>
       )}
+      <AIMonitorSettings client={client} onRunComplete={refreshAfterSave} />
       <details className="workbook-import">
         <summary>Import a historical workbook</summary>
         <p>
@@ -310,14 +366,26 @@ export function AdminPanel({ onChanged }) {
         open={!selected && Object.keys(values).length === 0}
       >
         <summary>Review incoming reports</summary>
+        <div className="review-queue-toolbar">
+          <label>Report status
+            <select value={queueStatus} disabled={busy} onChange={(event) => changeQueue(event.target.value)}>
+              <option value="pending">Awaiting review</option>
+              <option value="rejected">Rejected — feedback history</option>
+              <option value="approved">Approved</option>
+            </select>
+          </label>
+          <button type="button" className="secondary-action" disabled={busy} onClick={() => changeQueue(queueStatus)}>Refresh reports</button>
+        </div>
         {!candidates.length ? (
-          <p>No reports awaiting review.</p>
+          <p>{queueStatus === "pending" ? "No reports awaiting review." : `No ${queueStatus} reports.`}</p>
         ) : (
           <ul>
             {candidates.map((candidate) => (
               <li key={candidate.id}>
                 <strong>{candidate.title}</strong>
                 <p>{candidate.summary}</p>
+                {candidate.origin === "ai" && <p className="admin-help">AI-discovered report · {candidate.verificationStatus?.replaceAll("_", " ") || "requires review"}</p>}
+                {candidate.status === "rejected" && <p><strong>{rejectionLabels[candidate.rejectionReason] || candidate.rejectionReason || "Rejected"}</strong>{candidate.rejectionNotes ? ` — ${candidate.rejectionNotes}` : ""}</p>}
                 {safeReferenceUrl(candidate.sourceUrl) && (
                   <a
                     href={safeReferenceUrl(candidate.sourceUrl)}
@@ -327,8 +395,8 @@ export function AdminPanel({ onChanged }) {
                     Read source
                   </a>
                 )}
-                <button type="button" onClick={() => choose(candidate)}>
-                  Review
+                <button type="button" disabled={busy} onClick={() => choose(candidate)}>
+                  {candidate.status === "pending" ? "Review" : "View report"}
                 </button>
               </li>
             ))}
@@ -338,17 +406,27 @@ export function AdminPanel({ onChanged }) {
       <button
         type="button"
         className="secondary-action"
+        disabled={busy}
         onClick={() => choose(null)}
       >
         Add a new incident
       </button>
       {(selected || Object.keys(values).length > 0) && (
         <form className="incident-form" onSubmit={publish}>
-          <h2>{selected ? "Verify and publish report" : "New incident"}</h2>
+          <h2>{readOnly ? `${selected.status === "rejected" ? "Rejected" : "Approved"} report` : selected ? "Verify and publish report" : "New incident"}</h2>
+          {readOnly && <p className="admin-help">This report is read-only. Completed reviews cannot be published again from this queue.</p>}
+          {selected?.status === "approved" && <p className="admin-help">The fields below show the original source proposal. {selected.incidentId && <a href={`/?incident=${encodeURIComponent(selected.incidentId)}`} target="_blank" rel="noopener noreferrer">View the published record with the reviewer’s changes.</a>}</p>}
+          {selected?.status === "rejected" && <section className="review-feedback"><h3>Saved rejection feedback</h3><p><strong>{rejectionLabels[selected.rejectionReason] || selected.rejectionReason || "Reason not recorded"}</strong></p><p>{selected.rejectionNotes || "No additional explanation."}</p></section>}
+          {selected && <EvidenceDetails candidate={selected} />}
           <p>
-            Publish confirmed facts only. Do not guess a location from the
-            victim’s home country.
+            Fields follow the MCAD workbook. Leave unknown dates and locations blank. Publish confirmed facts only; do not guess coordinates from a country.
           </p>
+          {catalogError && <p className="admin-help">{catalogError}</p>}
+          {Object.entries(catalogs).map(([name, entries]) => <datalist id={`mcad-catalog-${name}`} key={name}>
+            {Array.isArray(entries) && entries.map((entry, index) => <option value={entry.value} key={`${entry.id || entry.value}-${index}`} />)}
+          </datalist>)}
+          <fieldset className="review-fields" disabled={readOnly || busy}>
+          <legend className="visually-hidden">Incident data</legend>
           <div className="incident-form-grid">
             {fields.map(([key, label, required, type = "text"]) => (
               <label
@@ -384,7 +462,8 @@ export function AdminPanel({ onChanged }) {
                 ) : (
                   <input
                     type={type}
-                    step={type === "number" ? "any" : undefined}
+                    step={type === "number" ? ["latitude", "longitude"].includes(key) ? "any" : "1" : undefined}
+                    list={catalogFields[key] ? `mcad-catalog-${catalogFields[key]}` : undefined}
                     value={values[key] ?? ""}
                     required={required}
                     onChange={(event) =>
@@ -401,21 +480,26 @@ export function AdminPanel({ onChanged }) {
               {classification.map(([key, label]) => (
                 <label key={key}>
                   {label}
-                  <textarea
+                  {catalogFields[key] ? <input
+                    list={`mcad-catalog-${catalogFields[key]}`}
+                    value={values[key] ?? ""}
+                    onChange={(event) => setValues({ ...values, [key]: event.target.value })}
+                  /> : <textarea
                     rows={2}
                     value={values[key] ?? ""}
                     onChange={(event) =>
                       setValues({ ...values, [key]: event.target.value })
                     }
-                  />
+                  />}
                 </label>
               ))}
             </div>
           </details>
-          <button className="primary-action" type="submit" disabled={busy}>
+          </fieldset>
+          {!readOnly && <>
+          <button className="primary-action" type="submit" disabled={busy || showRejectForm}>
             {busy ? "Publishing…" : "Publish verified incident"}
           </button>
-          
           {selected && (
             <>
               <button
@@ -486,7 +570,8 @@ export function AdminPanel({ onChanged }) {
               )}
             </>
           )}
-
+          </>}
+          <button type="button" className="secondary-action" disabled={busy} onClick={() => { choose(null); setValues({}); }}>Close report</button>
         </form>
       )}
     </div>

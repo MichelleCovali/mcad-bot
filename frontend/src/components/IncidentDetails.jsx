@@ -32,6 +32,33 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
   const references =
     incident.sources?.filter((source) => safeReferenceUrl(source.url)) ?? [];
   const sourceUrl = safeReferenceUrl(incident.sourceUrl);
+  const originalFields = Object.entries(incident.rawFields ?? {}).filter(([label]) => !label.startsWith("_"));
+  const classification = [
+    ["QA", "qa"],
+    ["Reference number", "referenceNumber"],
+    ["Month", "month"],
+    ["Year", "year"],
+    ["Year End (blank if same year)", "yearEnd"],
+    ["Google Map Location", "googleMapLocation"],
+    ["Victim identity", "victimIdentity"],
+    ["Victim type short", "victimTypeShort"],
+    ["Affected system", "affectedSystem"],
+    ["Method", "method"],
+    ["Social engineering technique", "socialEngineeringTechnique"],
+    ["Malware type", "malwareType"],
+    ["Ransomware type", "ransomwareType"],
+    ["Attack Pattern", "attackPattern"],
+    ["Motive", "motive"],
+    ["Motive short", "motiveShort"],
+    ["Campaign", "campaign"],
+    ["Impact", "impact"],
+    ["Impact short", "impactShort"],
+    ["Countermeasures", "countermeasures"],
+    ["Threat Actor", "threatActor"],
+    ["Additional info", "additionalInfo"],
+    ["Reference short", "referenceShort"],
+  ].filter(([label, key]) => incident[key] !== null && incident[key] !== undefined && incident[key] !== "" &&
+    !originalFields.some(([originalLabel, value]) => originalLabel.trim().toLowerCase() === label.toLowerCase() && valueText(value) === valueText(incident[key])));
   return (
     <div className="incident-details">
       {error && (
@@ -119,27 +146,11 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
           </ul>
         </section>
       )}
-      {Object.keys(incident.rawFields ?? {}).length === 0 && (
+      {classification.length > 0 && (
         <section className="detail-section">
-          <h3>Classification</h3>
+          <h3>Classification and record details</h3>
           <dl className="detail-fields">
-            {[
-              ["Victim identity", "victimIdentity"],
-              ["Affected system", "affectedSystem"],
-              ["Method", "method"],
-              ["Social engineering technique", "socialEngineeringTechnique"],
-              ["Malware type", "malwareType"],
-              ["Ransomware type", "ransomwareType"],
-              ["Attack pattern", "attackPattern"],
-              ["Motive", "motive"],
-              ["Campaign", "campaign"],
-              ["Impact", "impact"],
-              ["Countermeasures", "countermeasures"],
-              ["Threat actor", "threatActor"],
-              ["Additional information", "additionalInfo"],
-            ]
-              .filter(([, key]) => incident[key])
-              .map(([label, key]) => (
+            {classification.map(([label, key]) => (
                 <div className="detail-field" key={key}>
                   <dt>{label}</dt>
                   <dd>
@@ -150,13 +161,11 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
           </dl>
         </section>
       )}
-      {Object.keys(incident.rawFields ?? {}).length > 0 && (
+      {originalFields.length > 0 && (
         <section className="detail-section">
           <h3>Original record</h3>
           <dl className="detail-fields original-fields">
-            {Object.entries(incident.rawFields)
-              .filter(([label]) => !label.startsWith("_"))
-              .map(([label, value]) => (
+            {originalFields.map(([label, value]) => (
                 <div className="detail-field" key={label}>
                   <dt>{label.trim() || "Unnamed field"}</dt>
                   <dd>

@@ -132,7 +132,9 @@ def claim_delivery(factory, owner, now=None):
         return delivery_id if result.rowcount == 1 else None
 
 
-def deliver_one(factory, client, base_url="", owner=None, now=None):
+def deliver_one(factory, client, base_url="", owner=None, now=None, message_format="link"):
+    if message_format not in {"link", "rich"}:
+        raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
     owner, now = owner or str(uuid4()), now or utcnow()
     delivery_id = claim_delivery(factory, owner, now)
     if not delivery_id:
@@ -143,7 +145,19 @@ def deliver_one(factory, client, base_url="", owner=None, now=None):
         event = session.get(OutboxEvent, delivery.event_id)
         active = bool(subscriber and subscriber.active and subscriber.subscribed_at <= event.created_at)
         chat_id, payload = delivery.chat_id, event.payload
-    result = client.send(chat_id, notification_text(payload, base_url)) if active else None
+    result = None
+    if active:
+        # The original bot sends only the article URL. Keep that observable
+        # format while the database and review workflow are upgraded.
+        if message_format == "rich":
+            text = notification_text(payload, base_url)
+        elif payload.get("sourceUrl"):
+            text = safe_url(payload["sourceUrl"])
+        elif base_url:
+            text = f"{safe_url(base_url).rstrip('/')}/?incident={quote(str(payload['id']), safe='')}"
+        else:
+            text = notification_text(payload)
+        result = client.send(chat_id, text)
     with factory.begin() as session:
         delivery = session.scalar(select(Delivery).where(Delivery.id == delivery_id, Delivery.lease_owner == owner).with_for_update())
         if delivery is None:
@@ -252,6 +266,8 @@ class WorkerController:
                 jobs.append(("telegram_polling", self._poll_loop))
         if self.settings.enable_feed_polling:
             jobs.append(("feed_polling", self._feed_loop))
+        if self.settings.enable_ai_search:
+            jobs.append(("ai_monitor", self._ai_loop))
         for name, target in jobs:
             thread = threading.Thread(name=f"mcad-{name}", target=self._guard, args=(name, target), daemon=True)
             thread.start()
@@ -280,7 +296,8 @@ class WorkerController:
         while not self.stopped.is_set():
             try:
                 if claim_lease(self.factory, "telegram_delivery", self.owner):
-                    deliver_one(self.factory, self.client, self.settings.public_base_url, self.owner)
+                    deliver_one(self.factory, self.client, self.settings.public_base_url, self.owner,
+                                message_format=self.settings.telegram_message_format)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -323,4 +340,19 @@ class WorkerController:
                                 session.add(WorkerState(name="feed_last_poll", value={"timestamp": utcnow().timestamp()}))
             except Exception:
                 logger.warning("MCAD feed review queue temporarily unavailable; retrying.")
+            self.stopped.wait(60)
+
+    def _ai_loop(self):
+        from .ai_monitor import AIUnavailable, monitor_due, run_monitor_once
+
+        while not self.stopped.is_set():
+            try:
+                # Both the server gate and saved administrator setting are checked
+                # again when claiming a run. A configured API key alone does nothing.
+                if monitor_due(self.factory, self.settings):
+                    run_monitor_once(self.factory, self.settings, trigger="scheduled")
+            except AIUnavailable:
+                pass
+            except Exception:
+                logger.warning("MCAD AI monitor temporarily unavailable; check administrator run history.")
             self.stopped.wait(60)

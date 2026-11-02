@@ -288,10 +288,18 @@ export function createAdminClient(
       fetchImpl,
     });
   return {
-    candidates: async ({ signal } = {}) => {
-      const payload = await request("/admin/candidates", { signal });
+    candidates: async ({ signal, status = "pending" } = {}) => {
+      if (!["pending", "rejected", "approved", "all"].includes(status))
+        throw new Error("Choose a valid review status.");
+      const suffix = status === "pending" ? "" : `?status=${encodeURIComponent(status)}`;
+      const payload = await request(`/admin/candidates${suffix}`, { signal });
       return Array.isArray(payload) ? payload : (payload.items ?? []);
     },
+    catalogs: ({ signal } = {}) => request("/admin/catalogs", { signal }),
+    aiStatus: ({ signal } = {}) => request("/admin/ai-monitor", { signal }),
+    saveAISettings: (settings) =>
+      request("/admin/ai-monitor", { method: "PATCH", body: settings }),
+    runAI: () => request("/admin/ai-monitor/runs", { method: "POST" }),
     create: (record) => request("/incidents", { method: "POST", body: record }),
     approve: (id, record) =>
       request(`/admin/candidates/${encodeURIComponent(id)}/approve`, {

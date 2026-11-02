@@ -5,10 +5,12 @@ from sqlalchemy import select, text
 from mcad.models import SchemaVersion, utcnow
 from .v0001_initial import upgrade as initial_schema
 from .v0002_candidate_feedback import upgrade as candidate_feedback
+from .v0003_ai_monitor import upgrade as ai_monitor
 
 MIGRATIONS = [
     (1, initial_schema),
     (2, candidate_feedback),
+    (3, ai_monitor),
 ]
 
 def migrate(engine):

@@ -13,10 +13,14 @@ It does not run the legacy `bot.py` or `commands.py` loops.
 | `PUBLIC_BASE_URL` | Public HTTPS site URL used in `/map` and notification deep links. |
 | `TELEGRAM_BOT_TOKEN` | Optional existing bot token. When absent, no Telegram network requests run. |
 | `TELEGRAM_CHAT_ID` | Optional explicitly configured initial recipient. Startup never reverses an existing unsubscribe. |
+| `TELEGRAM_MESSAGE_FORMAT` | Defaults to `link`, preserving the old bot's URL-only alerts. `rich` explicitly opts into title/context/map text; command replies are unchanged. |
 | `ENABLE_BACKGROUND_WORKERS` | Defaults to `true`. Set `false` for isolated local/API testing. |
 | `ENABLE_FEED_POLLING` | Defaults to `true`; fetches candidates every 15 minutes while workers are enabled. |
 | `ENABLE_TELEGRAM_POLLING` | Defaults to `true`; requires a token and enabled workers. |
 | `CORS_ORIGINS` | Optional comma-separated allowed frontend origins. Omit for same-origin hosting. |
+| `ENABLE_AI_SEARCH` | Defaults to `false`. Server kill switch for paid AI discovery and verification; adding a key never enables it. |
+| `OPENAI_API_KEY` | Server-side OpenAI project key. Never included in browser configuration or status responses. |
+| `AI_DISCOVERY_MODEL` / `AI_VERIFICATION_MODEL` | Discovery and verification model IDs; default Luna and Sol. See [AI monitor](../docs/ai-monitor.md). |
 
 Keep these server secrets outside frontend `VITE_` variables. No health response
 or worker error log includes tokens, chat identifiers or database URLs.
@@ -58,11 +62,20 @@ Administrator operations require `Authorization: Bearer <ADMIN_API_TOKEN>`:
 
 - `POST /api/incidents` creates or idempotently updates a source record.
 - `PATCH /api/incidents/{id}` edits a record. Normal edits do not resend alerts.
-- `GET /api/admin/candidates` lists pending RSS review candidates; `status=all`
-  or `status=approved` can inspect previous reviews.
+- `GET /api/admin/candidates` lists pending review candidates; `status=all`,
+  `status=approved` or `status=rejected` can inspect previous reviews.
 - `POST /api/admin/candidates/{id}/approve` requires a human-verified title and
   accepts corrected incident fields; it publishes once. Repeated approval is
   idempotent.
+- `POST /api/admin/candidates/{id}/reject` stores a rejection reason and optional
+  notes. Only pending candidates can be approved or rejected; rejected candidates
+  cannot be published by a stale client.
+- `GET /api/admin/catalogs` returns workbook source fields and imported catalogs.
+- `GET /api/admin/ai-monitor` returns paused status, saved settings and run history.
+- `PATCH /api/admin/ai-monitor` saves settings without running a search. Enabling
+  is rejected while the server kill switch is off.
+- `POST /api/admin/ai-monitor/runs` explicitly requests one run, subject to both
+  enable gates, quota and concurrency checks. It never publishes incidents.
 - `POST /api/admin/import-workbook` accepts the raw XLSX body with
   `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` or
   `application/octet-stream`, at most 10 MiB. Authentication precedes reading
@@ -115,3 +128,6 @@ python -m pytest tests/test_backend.py tests/test_import_workbook.py
 
 Tests use temporary SQLite databases, synthetic notifications and injected feed
 data. They never call Telegram or start production pollers.
+
+Additional review and AI integration checks use mocked Responses API results;
+they do not consume API credits. See [AI monitor setup](../docs/ai-monitor.md).

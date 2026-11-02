@@ -1456,6 +1456,75 @@ header form.searchbar ul.typeahead .no-results button {
 .incident-form > .primary-action {
   margin-top: 20px;
 }
+.review-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.review-fields legend {
+  font-size: 14px;
+  color: #647785;
+  padding-top: 8px;
+}
+.review-fields:disabled input,
+.review-fields:disabled textarea,
+.review-fields:disabled select {
+  color: #445b6a;
+  background: #f7f9fa;
+  opacity: 1;
+}
+.review-queue-toolbar,
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+.review-queue-toolbar label {
+  flex: 1 1 200px;
+}
+.ai-monitor-settings {
+  padding: 14px 0;
+  border-bottom: 1px solid #e9edf0;
+}
+.monitor-state {
+  background: #f2f7fb;
+  padding: 12px 14px;
+  color: #00294b;
+}
+.admin-panel .monitor-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.admin-panel .monitor-toggle input {
+  width: auto;
+}
+.monitor-runs,
+.candidate-evidence ul {
+  padding-left: 20px;
+}
+.candidate-evidence,
+.review-feedback {
+  padding: 16px;
+  background: #f7f9fa;
+  margin: 16px 0;
+  overflow-wrap: anywhere;
+}
+.candidate-evidence blockquote {
+  border-left: 3px solid #b7cbd9;
+  padding-left: 12px;
+  margin-left: 0;
+  color: #445b6a;
+}
+.candidate-evidence a {
+  color: #005aaa;
+}
+.admin-panel button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
 @media (max-width: 768px) {
   .map-record-count {
     left: 25px;

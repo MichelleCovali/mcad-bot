@@ -124,14 +124,14 @@ class WorkerBehaviour(BackendCase):
                 self.last_text = text
                 return SendResult(False, 429, 60) if self.calls == 1 else SendResult(True, message_id="42")
         client = FakeClient()
-        self.assertTrue(deliver_one(self.factory, client, "https://example.invalid/map", now=now))
+        self.assertTrue(deliver_one(self.factory, client, "https://example.invalid/map", now=now, message_format="rich"))
         with self.factory() as session:
             delivery = session.scalar(select(Delivery))
             self.assertEqual(delivery.status, "retry")
             self.assertEqual(delivery.next_attempt_at, now + timedelta(seconds=60))
-        self.assertFalse(deliver_one(self.factory, client, now=now + timedelta(seconds=59)))
-        self.assertTrue(deliver_one(self.factory, client, now=now + timedelta(seconds=61)))
-        self.assertFalse(deliver_one(self.factory, client, now=now + timedelta(seconds=62)))
+        self.assertFalse(deliver_one(self.factory, client, now=now + timedelta(seconds=59), message_format="rich"))
+        self.assertTrue(deliver_one(self.factory, client, now=now + timedelta(seconds=61), message_format="rich"))
+        self.assertFalse(deliver_one(self.factory, client, now=now + timedelta(seconds=62), message_format="rich"))
         self.assertEqual(client.calls, 2)
         self.assertIn("<b>Plain-text fixture</b>", client.last_text)
         with self.factory() as session:

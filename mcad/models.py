@@ -163,6 +163,11 @@ class Candidate(Base):
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rejection_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(String(32), default="rss", server_default="rss")
+    proposed_fields: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    verification_status: Mapped[str] = mapped_column(String(32), default="unreviewed", server_default="unreviewed")
+    ai_run_id: Mapped[str | None] = mapped_column(ForeignKey("ai_runs.id"), nullable=True, index=True)
 
 
 
@@ -212,6 +217,32 @@ class WorkerState(Base):
     __tablename__ = "worker_state"
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class AIConfig(Base):
+    __tablename__ = "ai_config"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    runs_per_day: Mapped[int] = mapped_column(Integer, default=3)
+    lookback_hours: Mapped[int] = mapped_column(Integer, default=48)
+    max_candidates: Mapped[int] = mapped_column(Integer, default=5)
+    max_tool_calls: Mapped[int] = mapped_column(Integer, default=15)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AIRun(Base):
+    __tablename__ = "ai_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid)
+    trigger: Mapped[str] = mapped_column(String(32), default="manual")
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    candidates_created: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    web_search_calls: Mapped[int] = mapped_column(Integer, default=0)
+    response_ids: Mapped[list] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class ProcessedUpdate(Base):

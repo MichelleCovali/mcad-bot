@@ -9,12 +9,19 @@ queues a message for subscribed Telegram chats.
 - [Administration](https://mcad-web-production.up.railway.app/admin)
 - [Hosting, local development and Telegram setup](docs/hosting.md)
 - [Workbook import and data model](docs/data-import.md)
+- [AI monitor configuration and paused setup](docs/ai-monitor.md)
 - [Backend configuration and API](mcad/README.md)
 - [Frontend development](frontend/README.md)
 
 The Docker deployment uses PostgreSQL. Local development can use SQLite.
 RSS keyword matches require human review before publication. Location and date
 precision from the original records are preserved.
+
+The administrator can review, publish or reject candidates and inspect saved
+rejection feedback. The optional AI monitor discovers and cross-checks sources
+before preparing candidates in the same workbook structure. It is disabled by
+default: adding `OPENAI_API_KEY` or saving a schedule does not start a search.
+Existing Telegram message formatting is preserved.
 
 ## Legacy local prototype
 
