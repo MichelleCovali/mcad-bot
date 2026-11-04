@@ -1,17 +1,34 @@
-# MCAD Telegram Bot
+# MCAD: maritime cyber incident map and Telegram
 
-A university prototype that finds possible maritime cybersecurity
-reports on BleepingComputer and sends links through Telegram.
+The React map, FastAPI service and Telegram workers share one database.
+Historical Excel imports retain every source field and do not send alerts.
+New reports enter a review queue; publishing an incident updates the map and
+queues a message for subscribed Telegram chats.
 
-It has two modes:
+- [Hosted map](https://mcad-web-production.up.railway.app/)
+- [Administration](https://mcad-web-production.up.railway.app/admin)
+- [Hosting, local development and Telegram setup](docs/hosting.md)
+- [Workbook import and data model](docs/data-import.md)
+- [AI monitor configuration and paused setup](docs/ai-monitor.md)
+- [Backend configuration and API](mcad/README.md)
+- [Frontend development](frontend/README.md)
 
-- Automatic alerts: checks the recent RSS feed every 15 minutes
-  and sends new matching links to your configured chat.
-- Telegram commands: replies to /latest with the newest matching
-  report listed in BleepingComputer’s Port news archive.
+The Docker deployment uses PostgreSQL. Local development can use SQLite.
+RSS keyword matches require human review before publication. Location and date
+precision from the original records are preserved.
 
-The prototype uses keyword filtering, not AI.
-All reports require human review.
+The administrator can review, publish or reject candidates and inspect saved
+rejection feedback. The optional AI monitor discovers and cross-checks sources
+before preparing candidates in the same workbook structure. It is disabled by
+default: adding `OPENAI_API_KEY` or saving a schedule does not start a search.
+Existing Telegram message formatting is preserved.
+
+## Legacy local prototype
+
+The instructions below describe the original standalone `bot.py` and
+`commands.py` scripts. For the hosted map and shared database, follow
+[the current setup](docs/hosting.md). Do not run the old command poller with
+the same Telegram token as the hosted service.
 
 ## Before starting
 
