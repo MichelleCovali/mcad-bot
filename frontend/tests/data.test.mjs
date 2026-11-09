@@ -10,11 +10,42 @@ import {
 } from "../src/data/incidents.js";
 import { createIncidentIndex } from "../src/data/clusters.js";
 import { searchPlaces } from "../src/data/places.js";
-import { candidateDraft, reviewedIncidentPayload, submitReviewedIncident } from "../src/data/review.js";
+import { candidateDraft, reviewedIncidentPayload, submitReviewedIncident, requestedReviewCandidate } from "../src/data/review.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 // Test-only inputs. These are never bundled as default map records.
+test("Telegram checks are explicit authenticated requests and never start AI", async () => {
+  const calls = [];
+  const client = createAdminClient("test-token", { baseUrl: "/api", fetchImpl: async (url, options) => {
+    calls.push([url, options]);
+    return { ok: true, json: async () => ({ ok: true }) };
+  } });
+  assert.equal(calls.length, 0);
+  await client.telegramStatus();
+  assert.deepEqual(calls.map(([url, opts]) => [url, opts.method]), [["/api/admin/telegram", "GET"]]);
+  await client.testTelegram();
+  assert.equal(calls[1][0], "/api/admin/telegram/test");
+  assert.equal(calls[1][1].method, "POST");
+  assert.equal(calls[1][1].headers.Authorization, "Bearer test-token");
+  assert.ok(calls.every(([url]) => !url.includes("ai-monitor")));
+});
+
+test("Telegram review links open pending or already-reviewed reports without writes", async () => {
+  const pending = { id: "candidate-one", status: "pending" };
+  const paths = [];
+  const client = createAdminClient("test-token", { baseUrl: "/api", fetchImpl: async (url, options) => {
+    assert.equal(options.method, "GET");
+    paths.push(url);
+    return { ok: true, json: async () => ({ id: "reviewed/one", status: "approved" }) };
+  } });
+  assert.equal(await requestedReviewCandidate(client, [pending], ""), null);
+  assert.equal(await requestedReviewCandidate(client, [pending], "?candidate=candidate-one"), pending);
+  assert.equal(paths.length, 0);
+  assert.equal((await requestedReviewCandidate(client, [], "?candidate=reviewed%2Fone")).status, "approved");
+  assert.deepEqual(paths, ["/api/admin/candidates/reviewed%2Fone"]);
+});
+
 const record = (changes = {}) => ({
   id: "test-1",
   title: "Validation fixture",

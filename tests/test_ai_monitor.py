@@ -119,7 +119,7 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaises(AIUnavailable):
             update_monitor_settings(self.factory, replace(self.settings, enable_ai_search=False), {"enabled": True})
 
-    def test_two_models_independent_research_save_pending_candidate_and_no_notifications(self):
+    def test_two_models_independent_research_save_pending_candidate_without_publication(self):
         self.enable()
         client = self.happy_client()
         result = run_monitor_once(self.factory, self.settings, client=client)

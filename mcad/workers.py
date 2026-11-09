@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import Candidate, Delivery, Incident, OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow
 from .service import safe_url
+from .candidate_alerts import deliver_candidate_one
 
 
 logger = logging.getLogger("mcad.workers")
@@ -180,7 +181,7 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
     return True
 
 
-HELP = "MCAD verified incidents\n\n/subscribe — receive future verified incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nHistorical imports do not send alerts."
+HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nAI reports require human review. Historical imports do not send alerts."
 
 
 def process_update(factory, update_data, base_url=""):
@@ -207,7 +208,7 @@ def process_update(factory, update_data, base_url=""):
         chat_id = str(chat["id"])
         if command == "/subscribe":
             set_subscription(session, chat_id, True)
-            reply = "Subscribed. You will receive future verified MCAD incidents. Historical records are not sent."
+            reply = "Subscribed. You will receive new source-checked AI reports and published MCAD incidents. AI reports require human review. Historical records are not sent."
         elif command == "/unsubscribe":
             set_subscription(session, chat_id, False)
             reply = "Unsubscribed. MCAD incident alerts are stopped."
@@ -296,8 +297,11 @@ class WorkerController:
         while not self.stopped.is_set():
             try:
                 if claim_lease(self.factory, "telegram_delivery", self.owner):
-                    deliver_one(self.factory, self.client, self.settings.public_base_url, self.owner,
-                                message_format=self.settings.telegram_message_format)
+                    sent = deliver_one(self.factory, self.client, self.settings.public_base_url, self.owner,
+                                       message_format=self.settings.telegram_message_format)
+                    if not sent:
+                        deliver_candidate_one(self.factory, self.client, self.settings.public_base_url, self.owner,
+                                              message_format=self.settings.telegram_message_format)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)

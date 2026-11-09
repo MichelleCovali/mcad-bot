@@ -76,6 +76,10 @@ Administrator operations require `Authorization: Bearer <ADMIN_API_TOKEN>`:
   is rejected while the server kill switch is off.
 - `POST /api/admin/ai-monitor/runs` explicitly requests one run, subject to both
   enable gates, quota and concurrency checks. It never publishes incidents.
+- `GET /api/admin/candidates/{id}` opens a linked report, including review history.
+- `GET /api/admin/telegram` returns configuration readiness and aggregate queue counts.
+- `POST /api/admin/telegram/test` sends a labelled connection test to the configured
+  test chat, at most once per minute. It performs no AI search or publication.
 - `POST /api/admin/import-workbook` accepts the raw XLSX body with
   `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` or
   `application/octet-stream`, at most 10 MiB. Authentication precedes reading
@@ -99,6 +103,15 @@ imported source row retains batch, row number and raw fields separately.
 RSS filtering creates candidates, never map incidents. The first poll marks a
 baseline; neither baseline nor subsequent feed collection sends notifications
 or automatically geocodes/approves a report.
+
+New AI candidates assessed as `supported` create a separate transactional review
+outbox for existing subscribers. Uncertain, contradicted, potentially duplicate
+and already-known reports stay silent. Review alerts preserve the URL-only
+default; rich alerts explicitly require human review. Retry and opt-out state
+survive restarts. When a candidate is published, recipients who already received
+its review alert are excluded from the publication alert. Other eligible
+subscribers still receive publication; obsolete pending review deliveries cancel.
+Delivery and approval lock the same candidate to coordinate this transition.
 
 Private `/subscribe` opts into future verified publication events;
 `/unsubscribe` stops delivery. `/start` and `/help` explain commands. `/latest`

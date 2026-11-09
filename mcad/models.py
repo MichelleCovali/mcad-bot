@@ -206,6 +206,34 @@ class Delivery(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class CandidateNotification(Base):
+    __tablename__ = "candidate_notifications"
+    __table_args__ = (UniqueConstraint("candidate_id", name="uq_candidate_notifications_candidate"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CandidateDelivery(Base):
+    __tablename__ = "candidate_deliveries"
+    __table_args__ = (
+        UniqueConstraint("event_id", "chat_id", name="uq_candidate_deliveries_event_chat"),
+        CheckConstraint("status IN ('pending', 'retry', 'sending', 'sent', 'cancelled', 'failed')", name="candidate_delivery_status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid)
+    event_id: Mapped[str] = mapped_column(ForeignKey("candidate_notifications.id", ondelete="CASCADE"), index=True)
+    chat_id: Mapped[str] = mapped_column(ForeignKey("subscribers.chat_id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class WorkerLease(Base):
     __tablename__ = "worker_leases"
     name: Mapped[str] = mapped_column(String(64), primary_key=True)

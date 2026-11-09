@@ -8,7 +8,7 @@ import ipaddress
 import json
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 from uuid import uuid4
 
 import requests
@@ -352,6 +352,36 @@ def _identity(title):
     return re.sub(r"\s+", " ", title).casefold().strip()
 
 
+TRACKING_QUERY_KEYS = {"fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid", "yclid", "_ga", "_gl"}
+
+
+def _url_identity(value):
+    """Ignore known analytics parameters only; retain the original source URL elsewhere."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        normalized = safe_url(value)
+    except ValueError:
+        # Legacy malformed references must not prevent reviewing other records.
+        return value.strip()
+    if not normalized:
+        return ""
+    parts = urlsplit(normalized)
+    retained = []
+    for component in parts.query.split("&"):
+        key = unquote_plus(component.partition("=")[0]).casefold()
+        if not key.startswith("utm_") and key not in TRACKING_QUERY_KEYS:
+            retained.append(component)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(retained), ""))
+
+
+def _known_identity(identity, identities):
+    title, year = identity
+    return identity in identities or (title, None) in identities or (
+        year is None and any(known_title == title for known_title, _ in identities)
+    )
+
+
 def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
     proposals = []
     for row in result["candidates"]:
@@ -417,29 +447,43 @@ def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
 def _persist(factory, run_id, proposals):
     with factory.begin() as session:
         candidates = list(session.scalars(select(Candidate)))
-        existing_urls = {candidate.source_url for candidate in candidates}
+        existing_urls = {_url_identity(candidate.source_url) for candidate in candidates}
         for candidate in candidates:
             for url in (candidate.proposed_fields or {}).get("referenceUrls", []):
                 if isinstance(url, str):
-                    existing_urls.add(url)
+                    existing_urls.add(_url_identity(url))
             for source in (candidate.evidence or {}).get("sources", []):
                 if isinstance(source, dict) and isinstance(source.get("url"), str):
-                    existing_urls.add(source["url"])
-        existing_urls.update(url for url in session.scalars(select(Incident.source_url)) if url)
-        existing_urls.update(session.scalars(select(IncidentSource.url)))
+                    existing_urls.add(_url_identity(source["url"]))
+        existing_urls.update(_url_identity(url) for url in session.scalars(select(Incident.source_url)) if url)
+        existing_urls.update(_url_identity(url) for url in session.scalars(select(IncidentSource.url)))
         identities = {(_identity(title), year) for title, year in session.execute(select(Incident.title, Incident.year))}
         identities.update((_identity(candidate.title), (candidate.proposed_fields or {}).get("year")) for candidate in candidates)
         created = 0
         for proposal in proposals:
             identity = (_identity(proposal["title"]), proposal["proposed_fields"].get("year"))
-            urls = set(proposal["proposed_fields"]["referenceUrls"])
-            unused_urls = [url for url in proposal["proposed_fields"]["referenceUrls"] if url not in existing_urls]
-            if not unused_urls or identity in identities:
+            urls = {_url_identity(url) for url in proposal["proposed_fields"]["referenceUrls"]}
+            unused_urls = [url for url in proposal["proposed_fields"]["referenceUrls"] if _url_identity(url) not in existing_urls]
+            if not unused_urls or _known_identity(identity, identities):
                 continue
+            if urls & existing_urls:
+                # A new headline plus one new citation is not enough to establish
+                # a new incident. Preserve the lead, but require identity review.
+                evidence = dict(proposal.get("evidence") or {})
+                if proposal.get("verification_status") == "supported":
+                    proposal["verification_status"] = "needs_review"
+                    evidence["assessment"] = "needs_review"
+                evidence["uncertainties"] = [*evidence.get("uncertainties", []),
+                    "A source is already associated with a known incident or report; confirm this is a distinct event."]
+                proposal["evidence"] = evidence
             # A shared background reference is not sufficient to collapse distinct events.
             proposal["source_url"] = unused_urls[0]
             proposal["proposed_fields"]["sourceUrl"] = unused_urls[0]
-            session.add(Candidate(**proposal))
+            candidate = Candidate(**proposal)
+            session.add(candidate)
+            session.flush()
+            from .candidate_alerts import create_candidate_notification
+            create_candidate_notification(session, candidate)
             identities.add(identity)
             existing_urls.update(urls)
             created += 1

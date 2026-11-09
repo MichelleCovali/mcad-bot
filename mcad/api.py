@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import Settings
 from .db import get_session_factory, make_engine
-from .models import Candidate, Delivery, ImportBatch, Incident, Subscriber
+from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
 from .service import candidate_dict, incident_dict, iso, update_incident, upsert_incident
 from .security import ProtectedRequestsMiddleware
 
@@ -85,7 +85,8 @@ def create_app(settings=None, engine=None):
             "telegram": {"configured": bool(settings.telegram_bot_token),
                          "pollingEnabled": bool(settings.enable_workers and settings.enable_telegram_polling and settings.telegram_bot_token),
                          "subscriberCount": session.scalar(select(func.count()).select_from(Subscriber).where(Subscriber.active.is_(True))),
-                         "pendingDeliveries": session.scalar(select(func.count()).select_from(Delivery).where(Delivery.status.in_(["pending", "retry", "sending"])))},
+                         "pendingDeliveries": session.scalar(select(func.count()).select_from(Delivery).where(Delivery.status.in_(["pending", "retry", "sending"])))
+                             + session.scalar(select(func.count()).select_from(CandidateDelivery).where(CandidateDelivery.status.in_(["pending", "retry", "sending"])))},
             "feed": {"enabled": bool(settings.enable_workers and settings.enable_feed_polling),
                      "pendingCandidates": session.scalar(select(func.count()).select_from(Candidate).where(Candidate.status == "pending"))},
             "incidents": {"total": total, "mapped": mapped, "unmapped": total - mapped},
@@ -152,6 +153,13 @@ def create_app(settings=None, engine=None):
             "importBatchId": batch.id if batch else None,
         }
 
+    @app.get("/api/admin/candidates/{candidate_id}", dependencies=[Depends(require_admin)])
+    def get_candidate(candidate_id: str, session=Depends(session_dependency)):
+        candidate = session.get(Candidate, candidate_id)
+        if candidate is None:
+            raise HTTPException(404, "Candidate not found.")
+        return candidate_dict(candidate)
+
     @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
     def approve_candidate(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():
@@ -187,7 +195,7 @@ def create_app(settings=None, engine=None):
                     "evidence": getattr(candidate, "evidence", None) or {},
                     "proposedFields": getattr(candidate, "proposed_fields", None) or {},
                 }}
-            incident, _ = upsert_incident(session, approved, notify=True)
+            incident, _ = upsert_incident(session, approved, notify=True, reviewed_candidate_id=candidate.id)
             candidate.status, candidate.incident_id = "approved", incident.id
             result = incident_dict(incident, details=True)
         return result
@@ -260,6 +268,29 @@ def create_app(settings=None, engine=None):
             "reason": reason,
             "notes": notes.strip()
         }
+
+    @app.get("/api/admin/telegram", dependencies=[Depends(require_admin)])
+    def telegram_status(session=Depends(session_dependency)):
+        from .models import CandidateDelivery
+        return {"configured": bool(settings.telegram_bot_token),
+                "testChatConfigured": bool(settings.telegram_chat_id),
+                "activeSubscribers": session.scalar(select(func.count()).select_from(Subscriber).where(Subscriber.active.is_(True))),
+                "pendingDeliveries": session.scalar(select(func.count()).select_from(Delivery).where(Delivery.status.in_(["pending", "retry", "sending"])))
+                    + session.scalar(select(func.count()).select_from(CandidateDelivery).where(CandidateDelivery.status.in_(["pending", "retry", "sending"])))}
+
+    @app.post("/api/admin/telegram/test", dependencies=[Depends(require_admin)])
+    def test_telegram_connection():
+        from uuid import uuid4
+        from .workers import TelegramClient, claim_lease
+        if not settings.telegram_bot_token or not settings.telegram_chat_id:
+            raise HTTPException(409, "Set the Telegram bot token and test chat ID on the server first.")
+        if not claim_lease(factory, "telegram_test_cooldown", str(uuid4()), seconds=60):
+            raise HTTPException(429, "Wait one minute before sending another test notification.")
+        result = TelegramClient(settings.telegram_bot_token).send(settings.telegram_chat_id,
+            "MCAD test notification: Telegram is connected. This test did not run an AI search or publish an incident.")
+        if not result.ok:
+            raise HTTPException(502, "Telegram did not accept the test. Check the configured chat and bot access.")
+        return {"ok": True, "messageId": result.message_id}
 
     @app.get("/api/admin/ai-monitor", dependencies=[Depends(require_admin)])
     def ai_monitor_status():

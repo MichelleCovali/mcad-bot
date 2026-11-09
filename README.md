@@ -1,5 +1,7 @@
 # MCAD: maritime cyber incident map and Telegram
 
+[![MCAD CI](https://github.com/MichelleCovali/mcad-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MichelleCovali/mcad-bot/actions/workflows/ci.yml)
+
 The React map, FastAPI service and Telegram workers share one database.
 Historical Excel imports retain every source field and do not send alerts.
 New reports enter a review queue; publishing an incident updates the map and
@@ -21,7 +23,10 @@ The administrator can review, publish or reject candidates and inspect saved
 rejection feedback. The optional AI monitor discovers and cross-checks sources
 before preparing candidates in the same workbook structure. It is disabled by
 default: adding `OPENAI_API_KEY` or saving a schedule does not start a search.
-Existing Telegram message formatting is preserved.
+New, source-checked AI candidates notify subscribed Telegram chats once, while
+uncertain or potentially duplicate reports stay in the website queue. Publication
+still requires human approval. Existing Telegram message formatting is preserved.
+GitHub Actions checks every push and pull request; see [automated checks](docs/ci.md).
 
 ## Legacy local prototype
 

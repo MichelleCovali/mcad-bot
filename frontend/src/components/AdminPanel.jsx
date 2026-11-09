@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createAdminClient, safeReferenceUrl } from "../data/incidents.js";
-import { candidateDraft, reviewedIncidentPayload, REJECTION_PUBLICATION_BLOCK, submitReviewedIncident } from "../data/review.js";
+import { candidateDraft, reviewedIncidentPayload, REJECTION_PUBLICATION_BLOCK, submitReviewedIncident, requestedReviewCandidate } from "../data/review.js";
 import { AIMonitorSettings } from "./AIMonitorSettings.jsx";
+import { TelegramSettings } from "./TelegramSettings.jsx";
 
 const fields = [
   ["title", "Title", true],
@@ -126,6 +127,12 @@ export function AdminPanel({ onChanged }) {
       setQueueStatus("pending");
       setClient(connection);
       setToken("");
+      try {
+        const requested = await requestedReviewCandidate(connection, records, window.location.search);
+        if (requested) choose(requested);
+      } catch (failure) {
+        setError(`The linked report could not be opened. ${failure.message}`);
+      }
     } catch (failure) {
       setError(failure.message);
       tokenInput.current?.focus();
@@ -310,6 +317,7 @@ export function AdminPanel({ onChanged }) {
         </p>
       )}
       <AIMonitorSettings client={client} onRunComplete={refreshAfterSave} />
+      <TelegramSettings client={client} />
       <details className="workbook-import">
         <summary>Import a historical workbook</summary>
         <p>

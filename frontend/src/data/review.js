@@ -110,6 +110,12 @@ export function reviewedIncidentPayload(values) {
 
 export const REJECTION_PUBLICATION_BLOCK = "Complete or cancel rejection before publishing.";
 
+export async function requestedReviewCandidate(client, records, search) {
+  const id = new URLSearchParams(search).get("candidate");
+  if (!id) return null;
+  return records.find((candidate) => candidate.id === id) ?? await client.candidate(id);
+}
+
 export async function submitReviewedIncident(client, { candidate, payload, rejectionOpen = false }) {
   // All publication writes pass this guard, including implicit Enter submissions.
   if (rejectionOpen) throw new Error(REJECTION_PUBLICATION_BLOCK);

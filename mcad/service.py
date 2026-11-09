@@ -162,7 +162,7 @@ def _replace_relations(incident, values):
             children.append(model(**item))
 
 
-def create_publication_event(session, incident):
+def create_publication_event(session, incident, reviewed_candidate_id=None):
     if incident.status != "published" or incident.notification_suppressed:
         return None
     event = session.scalar(select(OutboxEvent).where(OutboxEvent.incident_id == incident.id, OutboxEvent.kind == "published"))
@@ -174,12 +174,23 @@ def create_publication_event(session, incident):
     })
     session.add(event)
     session.flush()
+    already_notified = set()
+    if reviewed_candidate_id:
+        from .models import CandidateDelivery, CandidateNotification
+        # Approval holds the same candidate lock as a candidate delivery. A
+        # completed research alert must not become a second alert on approval.
+        already_notified = set(session.scalars(
+            select(CandidateDelivery.chat_id).join(CandidateNotification,
+                CandidateDelivery.event_id == CandidateNotification.id).where(
+                    CandidateNotification.candidate_id == reviewed_candidate_id,
+                    CandidateDelivery.status == "sent")))
     for subscriber in session.scalars(select(Subscriber).where(Subscriber.active.is_(True), Subscriber.subscribed_at <= event.created_at)):
-        session.add(Delivery(event_id=event.id, chat_id=subscriber.chat_id))
+        if subscriber.chat_id not in already_notified:
+            session.add(Delivery(event_id=event.id, chat_id=subscriber.chat_id))
     return event
 
 
-def upsert_incident(session, payload, external_id=None, notify=False, import_batch_id=None, source_row=None):
+def upsert_incident(session, payload, external_id=None, notify=False, import_batch_id=None, source_row=None, reviewed_candidate_id=None):
     """Return (incident, created), without committing. Historical imports use notify=False.
 
     External IDs identify separate source records even when they share an article URL.
@@ -220,7 +231,7 @@ def upsert_incident(session, payload, external_id=None, notify=False, import_bat
         else:
             row.incident_id, row.raw_fields = incident.id, incident.raw_fields
     if notify and not was_published and incident.status == "published":
-        create_publication_event(session, incident)
+        create_publication_event(session, incident, reviewed_candidate_id=reviewed_candidate_id)
     session.flush()
     return incident, created
 

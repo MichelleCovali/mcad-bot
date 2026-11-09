@@ -61,9 +61,13 @@ story from the same origin, missing freshness, or search snippets alone remains
 excluded. Source independence and quoted claims still require human judgement: an
 opened URL proves the research trail, not that every model claim is correct.
 
-**Every result is a pending candidate. The monitor cannot publish an incident or create a
-Telegram notification.** An administrator checks the evidence, edits the proposed MCAD
-fields, and explicitly approves or rejects it. Rejection feedback is stored for review
+**Every result is a pending candidate. The monitor cannot publish an incident.** A new
+`supported` candidate creates a durable review notification for existing Telegram
+subscribers in the same transaction. The normal message remains its source URL;
+the optional rich format explicitly says human review is required. `needs_review`,
+`contradicted`, baseline and already-known reports do not trigger research alerts.
+An administrator checks the evidence, edits the proposed MCAD fields, and explicitly
+approves or rejects it. Rejection feedback is stored for review
 and future prompt context; this is not model fine-tuning.
 
 Candidate proposals follow the Excel incident structure. Unknown facts remain empty or
@@ -74,8 +78,23 @@ Publication records the reviewed proposal and evidence snapshot. Existing Excel 
 behaviour and the current Telegram message format are unchanged.
 
 Repeated title/year pairs and already-seen source sets are held back. A distinct event
-may share a background reference with a known incident if it has a new source URL.
+may share a background reference with a known incident if it has a new source URL;
+it then stays in manual review without a Telegram alert until its identity is resolved.
+Known analytics URL parameters are ignored when comparing sources. The same title with
+an unknown year is held back for identity review rather than treated as a new event.
 This is conservative duplicate prevention, not a complete event-identity resolver.
+
+Research alerts use their own durable outbox and per-recipient delivery state. Temporary
+Telegram failures retry with backoff; opt-outs and reviewed reports cancel unsent research
+alerts. At publication, people who already received the research alert are excluded from
+the publication alert. Other active subscribers can still receive publication. Sending
+and approval lock the same candidate so they cannot normally race into two messages;
+the existing crash-after-send limitation remains because Telegram has no idempotency key.
+
+The administrator's Telegram panel can send a labelled connection test to the configured
+test chat, at most once per minute. It neither runs AI nor creates an incident. Automated
+checks mock both external providers and also exercise PostgreSQL and the production
+container; see [CI](ci.md).
 
 ## Usage and verification
 

@@ -296,6 +296,9 @@ export function createAdminClient(
       return Array.isArray(payload) ? payload : (payload.items ?? []);
     },
     catalogs: ({ signal } = {}) => request("/admin/catalogs", { signal }),
+    candidate: (id) => request(`/admin/candidates/${encodeURIComponent(id)}`),
+    telegramStatus: ({ signal } = {}) => request("/admin/telegram", { signal }),
+    testTelegram: () => request("/admin/telegram/test", { method: "POST" }),
     aiStatus: ({ signal } = {}) => request("/admin/ai-monitor", { signal }),
     saveAISettings: (settings) =>
       request("/admin/ai-monitor", { method: "PATCH", body: settings }),
