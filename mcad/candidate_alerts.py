@@ -29,13 +29,15 @@ def create_candidate_notification(session, candidate):
         return None
     now, event_id = utcnow(), str(uuid4())
     insert = postgres_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
-    result = session.execute(insert(CandidateNotification).values(
+    inserted_id = session.scalar(insert(CandidateNotification).values(
         id=event_id, candidate_id=candidate.id, created_at=now,
         payload={"candidateId": candidate.id, "title": candidate.title,
                  "sourceUrl": source_url, "verificationStatus": "supported", "reviewRequired": True},
-    ).on_conflict_do_nothing(index_elements=["candidate_id"]))
+    ).on_conflict_do_nothing(index_elements=["candidate_id"]).returning(CandidateNotification.id))
     event = session.scalar(select(CandidateNotification).where(CandidateNotification.candidate_id == candidate.id))
-    if result.rowcount != 1:
+    # psycopg can report an unknown (-1) rowcount for INSERT; RETURNING
+    # distinguishes a new event from a conflict on both supported databases.
+    if inserted_id is None:
         return event
     for subscriber in session.scalars(select(Subscriber).where(
         Subscriber.active.is_(True), Subscriber.subscribed_at <= event.created_at,
