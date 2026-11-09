@@ -1,0 +1,167 @@
+name: MCAD CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI never receives production credentials or enables external workers.
+env:
+  ENABLE_BACKGROUND_WORKERS: "false"
+  ENABLE_FEED_POLLING: "false"
+  ENABLE_TELEGRAM_POLLING: "false"
+  ENABLE_AI_SEARCH: "false"
+  OPENAI_API_KEY: ""
+  TELEGRAM_BOT_TOKEN: ""
+  TELEGRAM_CHAT_ID: ""
+  ADMIN_API_TOKEN: "ci-only-not-a-production-secret"
+  DATABASE_URL: "sqlite+pysqlite:///:memory:"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Run isolated backend and mocked integration tests
+        run: python -m pytest tests -q --junitxml=backend-results.xml
+
+  postgres:
+    name: postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: mcad_ci
+          POSTGRES_PASSWORD: local-ci-only
+          POSTGRES_DB: mcad_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcad_ci -d mcad_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      MCAD_TEST_POSTGRES_URL: postgresql+psycopg://mcad_ci:local-ci-only@127.0.0.1:5432/mcad_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify PostgreSQL migrations and durable notification flow
+        run: python -m pytest tests/test_postgres.py -q --junitxml=postgres-results.xml
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:sites
+
+  container:
+    name: container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the production image
+        run: docker build --tag mcad-ci .
+      - name: Start an isolated application without external workers
+        run: |
+          docker run --detach --name mcad-ci --publish 127.0.0.1:8080:8080 \
+            --env DATABASE_URL=sqlite:////tmp/mcad-ci.sqlite3 \
+            --env ADMIN_API_TOKEN=ci-only-not-a-production-secret \
+            --env ENABLE_BACKGROUND_WORKERS=false \
+            --env ENABLE_FEED_POLLING=false \
+            --env ENABLE_TELEGRAM_POLLING=false \
+            --env ENABLE_AI_SEARCH=false \
+            --env OPENAI_API_KEY= \
+            --env TELEGRAM_BOT_TOKEN= \
+            --env TELEGRAM_CHAT_ID= \
+            mcad-ci
+      - name: Verify readiness, frontend and authentication
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import urlopen
+
+          base = "http://127.0.0.1:8080"
+          for attempt in range(30):
+              try:
+                  with urlopen(base + "/api/health", timeout=2) as response:
+                      health = json.load(response)
+                  break
+              except (URLError, TimeoutError, ConnectionError):
+                  if attempt == 29:
+                      raise
+                  time.sleep(2)
+          assert health["status"] == "ok"
+          assert health["database"] == "connected"
+          assert health["incidents"]["total"] == 0
+          assert health["ai"]["serverEnabled"] is False
+          assert health["telegram"]["configured"] is False
+          assert health["feed"]["enabled"] is False
+          with urlopen(base + "/", timeout=5) as response:
+              assert response.status == 200
+              assert "text/html" in response.headers["Content-Type"]
+          try:
+              urlopen(base + "/api/admin/ai-monitor", timeout=5)
+          except HTTPError as error:
+              assert error.code == 401
+          else:
+              raise AssertionError("Administrator endpoints must require authentication")
+          print("Container serves the map and API with AI and Telegram disabled.")
+          PY
+      - name: Show startup logs
+        if: always()
+        run: docker logs mcad-ci
+      - name: Remove the disposable container
+        if: always()
+        run: docker rm --force mcad-ci

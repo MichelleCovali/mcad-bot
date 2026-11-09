@@ -2,3 +2,16 @@
 .env
 __pycache__/
 sent_links.json
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+.env.*
+!.env.example
+/data/
+.pytest_cache/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.xlsx
