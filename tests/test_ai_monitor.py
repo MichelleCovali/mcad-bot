@@ -188,13 +188,40 @@ class MonitorTests(unittest.TestCase):
         run = run_monitor_once(self.factory, self.settings, client=self.happy_client(verified))
         self.assertEqual((run["status"], run["candidatesCreated"]), ("completed", 0))
 
-    def test_published_title_and_year_are_deduplicated_even_with_new_urls(self):
+    def test_published_title_and_year_with_new_urls_requires_update_review(self):
         self.enable()
         with self.factory.begin() as session:
-            upsert_incident(session, {"title": "Fictional port incident", "year": utcnow().year}, notify=False)
-        run = run_monitor_once(self.factory, self.settings, client=self.happy_client())
-        self.assertEqual(run["candidatesCreated"], 0)
-        self.assertEqual(self.count(Candidate), 0)
+            incident, _ = upsert_incident(
+                session,
+                {
+                    "title": "Fictional port incident",
+                    "year": utcnow().year,
+                },
+                notify=False,
+            )
+            incident_id = incident.id
+
+        run = run_monitor_once(
+            self.factory,
+            self.settings,
+            client=self.happy_client(),
+        )
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["candidatesCreated"], 1)
+
+        with self.factory() as session:
+            candidate = session.scalar(select(Candidate))
+            self.assertEqual(
+                candidate.relationship_type, "possible_update"
+            )
+            self.assertEqual(
+                candidate.related_incident_id, incident_id
+            )
+            self.assertEqual(candidate.status, "pending")
+            self.assertIsNone(candidate.incident_id)
+            self.assertEqual(
+                candidate.verification_status, "needs_review"
+            )
 
     def test_rejected_source_alias_is_not_reintroduced_but_shared_background_can_be_retained(self):
         self.enable()

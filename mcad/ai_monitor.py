@@ -496,6 +496,7 @@ def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
 
 def _persist(factory, run_id, proposals):
     with factory.begin() as session:
+        incidents = list(session.scalars(select(Incident)))
         candidates = list(session.scalars(select(Candidate)))
         existing_urls = {_url_identity(candidate.source_url) for candidate in candidates}
         for candidate in candidates:
@@ -514,9 +515,45 @@ def _persist(factory, run_id, proposals):
             identity = (_identity(proposal["title"]), proposal["proposed_fields"].get("year"))
             urls = {_url_identity(url) for url in proposal["proposed_fields"]["referenceUrls"]}
             unused_urls = [url for url in proposal["proposed_fields"]["referenceUrls"] if _url_identity(url) not in existing_urls]
-            if not unused_urls or _known_identity(identity, identities):
+            if not unused_urls:
+                continue
+
+            matching_incidents = [
+                incident
+                for incident in incidents
+                if identity[1] is not None
+                and incident.year == identity[1]
+                and _identity(incident.title) == identity[0]
+            ]
+
+            if matching_incidents:
+                proposal["relationship_type"] = "possible_update"
+                proposal["related_incident_id"] = (
+                    matching_incidents[0].id
+                    if len(matching_incidents) == 1
+                    else None
+                )
+                proposal["relationship_reason"] = (
+                    "Title and known year match an existing incident, "
+                    "and the report includes a previously unseen source. "
+                    "A reviewer must determine whether it adds material "
+                    "information."
+                    if len(matching_incidents) == 1
+                    else
+                    "Title and known year match multiple incidents. "
+                    "A reviewer must choose the correct incident, "
+                    "if any, before treating this as an update."
+                )
+            elif _known_identity(identity, identities):
                 continue
             if urls & existing_urls:
+                if proposal.get("relationship_type") != "possible_update":
+                    proposal["relationship_type"] = "possible_duplicate"
+                    proposal["relationship_reason"] = (
+                        "At least one source is already known. "
+                        "A reviewer must determine whether this is "
+                        "the same event or a separate incident."
+                    )
                 # A new headline plus one new citation is not enough to establish
                 # a new incident. Preserve the lead, but require identity review.
                 evidence = dict(proposal.get("evidence") or {})
@@ -525,6 +562,16 @@ def _persist(factory, run_id, proposals):
                     evidence["assessment"] = "needs_review"
                 evidence["uncertainties"] = [*evidence.get("uncertainties", []),
                     "A source is already associated with a known incident or report; confirm this is a distinct event."]
+                proposal["evidence"] = evidence
+            if proposal.get("relationship_type") == "possible_update":
+                evidence = dict(proposal.get("evidence") or {})
+                if proposal.get("verification_status") == "supported":
+                    proposal["verification_status"] = "needs_review"
+                    evidence["assessment"] = "needs_review"
+                evidence["uncertainties"] = [
+                    *evidence.get("uncertainties", []),
+                    proposal["relationship_reason"],
+                ]
                 proposal["evidence"] = evidence
             # A shared background reference is not sufficient to collapse distinct events.
             proposal["source_url"] = unused_urls[0]
