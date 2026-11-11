@@ -168,6 +168,15 @@ class Candidate(Base):
     evidence: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     verification_status: Mapped[str] = mapped_column(String(32), default="unreviewed", server_default="unreviewed")
     ai_run_id: Mapped[str | None] = mapped_column(ForeignKey("ai_runs.id"), nullable=True, index=True)
+    relationship_type: Mapped[str] = mapped_column(
+        String(32), default="unclassified", server_default="unclassified"
+    )
+    related_incident_id: Mapped[str | None] = mapped_column(
+        ForeignKey("incidents.id"), nullable=True, index=True
+    )
+    relationship_reason: Mapped[str] = mapped_column(
+        Text, default="", server_default=""
+    )
 
 
 

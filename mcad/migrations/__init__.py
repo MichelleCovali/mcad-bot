@@ -7,12 +7,14 @@ from .v0001_initial import upgrade as initial_schema
 from .v0002_candidate_feedback import upgrade as candidate_feedback
 from .v0003_ai_monitor import upgrade as ai_monitor
 from .v0004_candidate_alerts import upgrade as candidate_alerts
+from .v0005_candidate_relationships import upgrade as candidate_relationships
 
 MIGRATIONS = [
     (1, initial_schema),
     (2, candidate_feedback),
     (3, ai_monitor),
     (4, candidate_alerts),
+    (5, candidate_relationships),
 ]
 
 def migrate(engine):
