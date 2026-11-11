@@ -291,12 +291,18 @@ export function createAdminClient(
     candidates: async ({ signal, status = "pending" } = {}) => {
       if (!["pending", "rejected", "approved", "all"].includes(status))
         throw new Error("Choose a valid review status.");
-      const suffix = status === "pending" ? "" : `?status=${encodeURIComponent(status)}`;
+      const suffix =
+        status === "pending" ? "" : `?status=${encodeURIComponent(status)}`;
       const payload = await request(`/admin/candidates${suffix}`, { signal });
       return Array.isArray(payload) ? payload : (payload.items ?? []);
     },
     catalogs: ({ signal } = {}) => request("/admin/catalogs", { signal }),
     candidate: (id) => request(`/admin/candidates/${encodeURIComponent(id)}`),
+    resolveRelationship: (id, decision, reason) =>
+      request(`/admin/candidates/${encodeURIComponent(id)}/relationship`, {
+        method: "POST",
+        body: { decision, reason },
+      }),
     telegramStatus: ({ signal } = {}) => request("/admin/telegram", { signal }),
     testTelegram: () => request("/admin/telegram/test", { method: "POST" }),
     aiStatus: ({ signal } = {}) => request("/admin/ai-monitor", { signal }),

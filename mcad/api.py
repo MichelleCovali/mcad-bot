@@ -160,6 +160,63 @@ def create_app(settings=None, engine=None):
             raise HTTPException(404, "Candidate not found.")
         return candidate_dict(candidate)
 
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/relationship",
+        dependencies=[Depends(require_admin)],
+    )
+    def resolve_candidate_relationship(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency),
+    ):
+        if payload.get("decision") != "new_incident":
+            raise HTTPException(
+                422, "The supported decision is new_incident."
+            )
+
+        reason = payload.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > 2000
+        ):
+            raise HTTPException(
+                422, "Provide a review reason of 1–2000 characters."
+            )
+
+        with session.begin():
+            candidate = session.scalar(
+                select(Candidate)
+                .where(Candidate.id == candidate_id)
+                .with_for_update()
+            )
+            if candidate is None:
+                raise HTTPException(404, "Candidate not found.")
+            if candidate.status != "pending":
+                raise HTTPException(
+                    409, "Only pending candidates can be reclassified."
+                )
+
+            evidence = dict(candidate.evidence or {})
+            history = list(evidence.get("relationshipReviews", []))
+            history.append({
+                "previousType": candidate.relationship_type,
+                "previousRelatedIncidentId": candidate.related_incident_id,
+                "previousReason": candidate.relationship_reason,
+                "decision": "new_incident",
+                "reason": reason.strip(),
+            })
+            evidence["relationshipReviews"] = history
+
+            candidate.evidence = evidence
+            candidate.relationship_type = "new_incident"
+            candidate.related_incident_id = None
+            candidate.relationship_reason = reason.strip()
+
+            result = candidate_dict(candidate)
+
+        return result
+
     @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
     def approve_candidate(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():

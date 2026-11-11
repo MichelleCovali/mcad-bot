@@ -196,6 +196,7 @@ export function AdminPanel({ onChanged }) {
   const [message, setMessage] = useState("");
   const [workbook, setWorkbook] = useState(null);
   const [importReport, setImportReport] = useState(null);
+  const [relationshipReason, setRelationshipReason] = useState("");
   useEffect(() => {
     if (!client) return;
     const controller = new AbortController();
@@ -253,6 +254,7 @@ export function AdminPanel({ onChanged }) {
     setValues(candidateDraft(candidate));
     setMessage("");
     setError("");
+    setRelationshipReason("");
   }
   async function changeQueue(status) {
     queueRequest.current?.abort();
@@ -285,6 +287,45 @@ export function AdminPanel({ onChanged }) {
       );
     }
   }
+
+  async function markAsSeparateIncident() {
+    if (
+      busy ||
+      showRejectForm ||
+      !selected ||
+      selected.status !== "pending" ||
+      !candidateNeedsRelationshipReview(selected) ||
+      !relationshipReason.trim()
+    )
+      return;
+
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const updated = await client.resolveRelationship(
+        selected.id,
+        "new_incident",
+        relationshipReason.trim(),
+      );
+
+      setSelected(updated);
+      setCandidates((rows) =>
+        rows.map((row) => (row.id === updated.id ? updated : row)),
+      );
+      setRelationshipReason("");
+      setMessage(
+        "Marked as a separate incident. Nothing has been published. " +
+          "Review the evidence and incident details before publishing.",
+      );
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function publish(event) {
     event.preventDefault();
     if (busy || (selected && selected.status !== "pending")) return;
@@ -625,6 +666,38 @@ export function AdminPanel({ onChanged }) {
           )}
           {selected && <EvidenceDetails candidate={selected} />}
           {selected && <CandidateRelationship candidate={selected} />}
+          {selected?.status === "pending" && relationshipBlocked && (
+            <section className="candidate-evidence">
+              <h3>Does this report describe a separate incident?</h3>
+              <p>
+                Use this action only if you have checked the suggested match and
+                concluded that these are different events. This decision does
+                not publish the report.
+              </p>
+
+              <label>
+                Reason for treating this as a separate incident
+                <textarea
+                  value={relationshipReason}
+                  onChange={(event) =>
+                    setRelationshipReason(event.target.value)
+                  }
+                  maxLength={2000}
+                  rows={3}
+                  disabled={busy || showRejectForm}
+                />
+              </label>
+
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={busy || showRejectForm || !relationshipReason.trim()}
+                onClick={markAsSeparateIncident}
+              >
+                Treat as separate incident
+              </button>
+            </section>
+          )}
           <p>
             Fields follow the MCAD workbook. Leave unknown dates and locations
             blank. Publish confirmed facts only; do not guess coordinates from a
