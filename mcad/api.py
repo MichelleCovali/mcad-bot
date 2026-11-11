@@ -170,6 +170,18 @@ def create_app(settings=None, engine=None):
                 return incident_dict(session.get(Incident, candidate.incident_id), details=True)
             if candidate.status != "pending":
                 raise HTTPException(409, "Only pending candidates can be approved.")
+            if (
+                candidate.relationship_type not in {
+                    "unclassified", "new_incident"
+                }
+                or candidate.related_incident_id is not None
+            ):
+                raise HTTPException(
+                    409,
+                    "This candidate may concern an existing incident. "
+                    "Ordinary publication is blocked until its "
+                    "relationship has been reviewed.",
+                )
             if not isinstance(payload.get("title"), str) or not payload["title"].strip():
                 raise ValueError("A human-verified title is required for approval")
             # The row lock is used by PostgreSQL. The conditional transition also
