@@ -283,5 +283,8 @@ def candidate_dict(candidate):
         "evidence": getattr(candidate, "evidence", None) or {},
         "verificationStatus": getattr(candidate, "verification_status", "unreviewed"),
         "aiRunId": getattr(candidate, "ai_run_id", None),
+        "relationshipType": candidate.relationship_type,
+        "relatedIncidentId": candidate.related_incident_id,
+        "relationshipReason": candidate.relationship_reason,
     }
 
