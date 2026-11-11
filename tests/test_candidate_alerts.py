@@ -227,3 +227,70 @@ class CandidateAlerts(unittest.TestCase):
             controller.stopped.wait = lambda _seconds: controller.stopped.set()
             controller._delivery_loop()
             send_candidate.assert_called_once()
+
+    def test_related_candidates_do_not_create_alerts(self):
+        self.subscribe()
+
+        with self.factory.begin() as session:
+            incident = Incident(title="Existing incident")
+            session.add(incident)
+            session.flush()
+            incident_id = incident.id
+
+        variants = [
+            {"relationship_type": "possible_update"},
+            {"relationship_type": "possible_duplicate"},
+            {"related_incident_id": incident_id},
+        ]
+
+        for index, fields in enumerate(variants):
+            with self.subTest(fields=fields):
+                self.create(
+                    source_url=f"https://example.invalid/related-{index}",
+                    **fields,
+                )
+
+        self.assertEqual(self.count(Candidate), 3)
+        self.assertEqual(self.count(CandidateNotification), 0)
+        self.assertEqual(self.count(CandidateDelivery), 0)
+
+    def test_relationship_change_cancels_queued_alert(self):
+        self.subscribe()
+
+        with self.factory.begin() as session:
+            incident = Incident(title="Existing incident")
+            session.add(incident)
+            session.flush()
+            incident_id = incident.id
+
+        variants = [
+            {"relationship_type": "possible_update"},
+            {"relationship_type": "possible_duplicate"},
+            {"related_incident_id": incident_id},
+        ]
+
+        client = FakeClient()
+
+        for index, fields in enumerate(variants):
+            with self.subTest(fields=fields):
+                candidate_id = self.create(
+                    source_url=f"https://example.invalid/queued-{index}"
+                )
+
+                with self.factory.begin() as session:
+                    candidate = session.get(Candidate, candidate_id)
+                    for key, value in fields.items():
+                        setattr(candidate, key, value)
+
+                self.assertTrue(
+                    deliver_candidate_one(self.factory, client)
+                )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(self.count(CandidateDelivery), 3)
+
+        with self.factory() as session:
+            deliveries = list(session.scalars(select(CandidateDelivery)))
+            self.assertTrue(
+                all(item.status == "cancelled" for item in deliveries)
+            )

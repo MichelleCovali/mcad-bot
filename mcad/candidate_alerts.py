@@ -22,6 +22,13 @@ def create_candidate_notification(session, candidate):
     function never creates another event, adds new recipients, or sends HTTP.
     """
     session.flush()
+    if (
+        candidate.relationship_type not in {
+            "unclassified", "new_incident"
+        }
+        or candidate.related_incident_id is not None
+    ):
+        return None
     if candidate.origin != "ai" or candidate.verification_status != "supported" or candidate.status != "pending" or candidate.baseline:
         return None
     source_url = safe_url(candidate.source_url)
@@ -118,8 +125,17 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
         event = session.get(CandidateNotification, delivery.event_id)
         subscriber = session.get(Subscriber, delivery.chat_id)
         active = bool(subscriber and subscriber.active and subscriber.subscribed_at <= event.created_at)
-        reviewable = bool(candidate and candidate.status == "pending" and candidate.origin == "ai"
-                          and candidate.verification_status == "supported" and not candidate.baseline)
+        reviewable = bool(
+            candidate
+            and candidate.status == "pending"
+            and candidate.origin == "ai"
+            and candidate.verification_status == "supported"
+            and not candidate.baseline
+            and candidate.relationship_type in {
+                "unclassified", "new_incident"
+            }
+            and candidate.related_incident_id is None
+        )
         delivery.lease_until, delivery.lease_owner = None, None
         if not active or not reviewable:
             delivery.status = "cancelled"
