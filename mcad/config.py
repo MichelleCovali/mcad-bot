@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,12 +11,26 @@ def env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def parse_reviewer_ids(value: str) -> frozenset[int]:
+    """Parse comma-separated Telegram *user* IDs; empty means no reviewers."""
+    if not value.strip():
+        return frozenset()
+    result = set()
+    for part in value.split(","):
+        item = part.strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", item):
+            raise ValueError("TELEGRAM_REVIEWER_IDS must be comma-separated positive numeric user IDs")
+        result.add(int(item))
+    return frozenset(result)
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "sqlite:///./data/mcad.sqlite3"
     admin_api_token: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_reviewer_ids: frozenset[int] = frozenset()
     public_base_url: str = ""
     enable_workers: bool = True
     enable_feed_polling: bool = True
@@ -44,6 +59,7 @@ class Settings:
             admin_api_token=os.getenv("ADMIN_API_TOKEN", "").strip(),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_reviewer_ids=parse_reviewer_ids(os.getenv("TELEGRAM_REVIEWER_IDS", "")),
             telegram_message_format=os.getenv("TELEGRAM_MESSAGE_FORMAT", "link").strip().lower(),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
             enable_workers=env_bool("ENABLE_BACKGROUND_WORKERS", True),
