@@ -19,6 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .models import Candidate, Delivery, Incident, OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow
 from .service import safe_url
 from .candidate_alerts import deliver_candidate_one
+from .telegram_review import CallbackReply, is_authorized_review_callback, parse_preview_action
 
 
 logger = logging.getLogger("mcad.workers")
@@ -92,11 +93,14 @@ class TelegramClient:
     def __init__(self, token):
         self.token = token
 
-    def send(self, chat_id, text):
+    def send(self, chat_id, text, reply_markup=None):
+        body = {"chat_id": chat_id, "text": clean_text(text)[:4096], "link_preview_options": {"is_disabled": True}}
+        if reply_markup is not None:
+            body["reply_markup"] = reply_markup
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{self.token}/sendMessage",
-                json={"chat_id": chat_id, "text": clean_text(text)[:4096], "link_preview_options": {"is_disabled": True}},
+                json=body,
                 timeout=20,
             )
             data = response.json()
@@ -110,9 +114,20 @@ class TelegramClient:
             # Never log the request URL: it contains the bot token.
             return SendResult(False)
 
+    def answer_callback(self, callback_id: str, message: str) -> None:
+        """Acknowledge preview button taps; never mutate incidents here."""
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.token}/answerCallbackQuery",
+                json={"callback_query_id": callback_id, "text": clean_text(message)[:200], "show_alert": True},
+                timeout=10,
+            )
+        except requests.RequestException:
+            logger.warning("MCAD Telegram callback acknowledgment failed.")
+
     def get_updates(self, offset):
         try:
-            response = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params={"offset": offset, "timeout": 25, "allowed_updates": '["message"]'}, timeout=35)
+            response = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params={"offset": offset, "timeout": 25, "allowed_updates": '["message","callback_query"]'}, timeout=35)
             data = response.json()
             return data if isinstance(data, dict) else {"ok": False}
         except (requests.RequestException, ValueError):
@@ -184,7 +199,7 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
 HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nAI reports require human review. Historical imports do not send alerts."
 
 
-def process_update(factory, update_data, base_url=""):
+def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(), review_buttons_enabled=False):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -199,6 +214,25 @@ def process_update(factory, update_data, base_url=""):
             state.value = {"offset": next_offset}
         else:
             session.add(WorkerState(name="telegram_offset", value={"offset": next_offset}))
+        callback = update_data.get("callback_query")
+        if isinstance(callback, dict):
+            callback_id = callback.get("id")
+            if not isinstance(callback_id, str) or not callback_id:
+                return None
+            if not review_buttons_enabled:
+                return CallbackReply(callback_id, "Telegram review is not enabled. Use the MCAD admin panel.")
+            if not is_authorized_review_callback(callback, reviewer_ids):
+                return CallbackReply(callback_id, "Reviewer access is restricted.")
+            action = parse_preview_action(callback.get("data"))
+            if action is None:
+                return CallbackReply(callback_id, "Unknown review action.")
+            _, candidate_id = action
+            candidate = session.get(Candidate, candidate_id)
+            if candidate is None or candidate.status != "pending":
+                return CallbackReply(callback_id, "This report is no longer awaiting review.")
+            # Stage 2 is deliberately read-only. Stage 3 must use the existing
+            # API's verification, relationship and atomic status safeguards.
+            return CallbackReply(callback_id, "Preview only: use the MCAD admin panel to review this report.")
         message = update_data.get("message") or {}
         chat = message.get("chat") or {}
         if chat.get("type") != "private" or not isinstance(chat.get("id"), int):
@@ -301,7 +335,9 @@ class WorkerController:
                                        message_format=self.settings.telegram_message_format)
                     if not sent:
                         deliver_candidate_one(self.factory, self.client, self.settings.public_base_url, self.owner,
-                                              message_format=self.settings.telegram_message_format)
+                                              message_format=self.settings.telegram_message_format,
+                                              reviewer_ids=self.settings.telegram_reviewer_ids,
+                                              review_buttons_enabled=self.settings.enable_telegram_review_buttons)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -322,8 +358,14 @@ class WorkerController:
             for item in data.get("result", []):
                 if self.stopped.is_set() or not claim_lease(self.factory, "telegram_polling", self.owner):
                     break
-                reply = process_update(self.factory, item, self.settings.public_base_url)
-                if reply:
+                reply = process_update(
+                    self.factory, item, self.settings.public_base_url,
+                    reviewer_ids=self.settings.telegram_reviewer_ids,
+                    review_buttons_enabled=self.settings.enable_telegram_review_buttons,
+                )
+                if isinstance(reply, CallbackReply):
+                    self.client.answer_callback(reply.callback_id, reply.text)
+                elif reply:
                     self.client.send(*reply)
                     self.stopped.wait(1.05)
 

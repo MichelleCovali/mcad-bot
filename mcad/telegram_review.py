@@ -24,3 +24,40 @@ def is_authorized_review_callback(callback_query: dict | None, reviewer_ids: fro
         and chat.get("type") == "private"
         and chat.get("id") == user_id
     )
+
+
+# Telegram callback_data is limited to 64 bytes. We use a fixed action and UUID
+# rather than inserting user-provided text or full incident details.
+from dataclasses import dataclass
+from uuid import UUID
+
+
+@dataclass(frozen=True)
+class CallbackReply:
+    callback_id: str
+    text: str
+
+
+def preview_keyboard(candidate_id: str) -> dict | None:
+    """Safe, explicitly *preview* actions; never imply review is already enabled."""
+    try:
+        if str(UUID(candidate_id)) != candidate_id:
+            return None
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return {"inline_keyboard": [
+        [{"text": "Approve (preview)", "callback_data": f"mcad:p:approve:{candidate_id}"},
+         {"text": "Reject (preview)", "callback_data": f"mcad:p:reject:{candidate_id}"}],
+        [{"text": "Correct (preview)", "callback_data": f"mcad:p:correct:{candidate_id}"}],
+    ]}
+
+
+def parse_preview_action(data: object) -> tuple[str, str] | None:
+    if not isinstance(data, str):
+        return None
+    chunks = data.split(":")
+    if len(chunks) != 4 or chunks[:2] != ["mcad", "p"] or chunks[2] not in {"approve", "reject", "correct"}:
+        return None
+    if preview_keyboard(chunks[3]) is None:
+        return None
+    return chunks[2], chunks[3]

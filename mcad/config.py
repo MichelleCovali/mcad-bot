@@ -31,6 +31,8 @@ class Settings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_reviewer_ids: frozenset[int] = frozenset()
+    # Preview-only callbacks; no incident approval/rejection until stage 3.
+    enable_telegram_review_buttons: bool = False
     public_base_url: str = ""
     enable_workers: bool = True
     enable_feed_polling: bool = True
@@ -60,6 +62,7 @@ class Settings:
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
             telegram_reviewer_ids=parse_reviewer_ids(os.getenv("TELEGRAM_REVIEWER_IDS", "")),
+            enable_telegram_review_buttons=env_bool("ENABLE_TELEGRAM_REVIEW_BUTTONS", False),
             telegram_message_format=os.getenv("TELEGRAM_MESSAGE_FORMAT", "link").strip().lower(),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
             enable_workers=env_bool("ENABLE_BACKGROUND_WORKERS", True),

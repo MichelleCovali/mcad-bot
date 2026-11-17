@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import Candidate, CandidateDelivery, CandidateNotification, Subscriber, utcnow
 from .service import safe_url
+from .telegram_review import preview_keyboard
 
 
 def create_candidate_notification(session, candidate):
@@ -96,7 +97,8 @@ def candidate_notification_text(payload, base_url="", message_format="link"):
     return "\n".join(lines)[:4096]
 
 
-def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link"):
+def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link",
+                          reviewer_ids=frozenset(), review_buttons_enabled=False):
     if message_format not in {"link", "rich"}:
         raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
     owner, now = owner or str(uuid4()), now or utcnow()
@@ -141,7 +143,17 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
             delivery.status = "cancelled"
             delivery.last_error = "unsubscribed" if not active else "candidate_not_pending"
             return True
-        result = client.send(delivery.chat_id, candidate_notification_text(event.payload, base_url, message_format))
+        # Only explicit, private-chat reviewer subscribers get preview buttons.
+        # All other subscribers retain the existing link/rich notification format.
+        markup = (preview_keyboard(candidate.id) if review_buttons_enabled
+                  and str(delivery.chat_id) in {str(x) for x in reviewer_ids} else None)
+        if markup is not None:
+            result = client.send(delivery.chat_id,
+                                 candidate_notification_text(event.payload, base_url, "rich"),
+                                 reply_markup=markup)
+        else:
+            result = client.send(delivery.chat_id,
+                                 candidate_notification_text(event.payload, base_url, message_format))
         if result.ok:
             delivery.status, delivery.sent_at = "sent", now
             delivery.telegram_message_id, delivery.last_error = result.message_id, None
