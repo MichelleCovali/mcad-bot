@@ -17,8 +17,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import Settings
 from .db import get_session_factory, make_engine
-from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
-from .service import candidate_dict, incident_dict, iso, update_incident, upsert_incident
+from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, IncidentSource, Subscriber, utcnow
+from .service import candidate_dict, incident_dict, iso, safe_url, snake_case, update_incident, upsert_incident
 from .security import ProtectedRequestsMiddleware
 
 
@@ -215,6 +215,152 @@ def create_app(settings=None, engine=None):
 
             result = candidate_dict(candidate)
 
+        return result
+
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/apply-update",
+        dependencies=[Depends(require_admin)],
+    )
+    def apply_candidate_update(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency),
+    ):
+        """Apply explicitly reviewed corrections to an existing incident.
+
+        Never call the new-incident upsert path: that could create a duplicate
+        and trigger publication. Preserve source and review history instead.
+        """
+        if not isinstance(payload, dict):
+            raise HTTPException(422, "Expected an update review object.")
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 2000:
+            raise HTTPException(422, "Provide a review reason of 1–2000 characters.")
+        changes = payload.get("changes", {})
+        # Phase A only covers additions/corrections to these text fields.
+        # Identifiers, publication status, dates and coordinates must never be
+        # copied blindly from an AI-generated candidate.
+        permitted_fields = {
+            "description", "summary", "impact", "impact_short", "method",
+            "affected_system", "countermeasures", "additional_info",
+            "threat_actor", "victim_type", "impact_area",
+        }
+        if not isinstance(changes, dict):
+            raise HTTPException(422, "changes must be an object.")
+        updates = {}
+        for supplied_key, value in changes.items():
+            key = snake_case(supplied_key)
+            if key not in permitted_fields or key in updates:
+                raise HTTPException(422, f"Field {supplied_key} cannot be updated here.")
+            if not isinstance(value, str) or not value.strip():
+                raise HTTPException(422, "Update fields must contain verified, non-empty text.")
+            updates[key] = value.strip()
+
+        extra_urls = payload.get("sourceUrls", [])
+        if not isinstance(extra_urls, list) or len(extra_urls) > 20:
+            raise HTTPException(422, "sourceUrls must be an array of up to 20 URLs.")
+        if not updates and not extra_urls:
+            raise HTTPException(422, "Provide at least one verified change or source URL.")
+        # Normalize URLs before any database write, rejecting malformed input.
+        if any(not isinstance(url, str) for url in extra_urls):
+            raise HTTPException(422, "sourceUrls must contain URL strings.")
+        normalized_urls = [safe_url(url) for url in extra_urls]
+        if any(url is None for url in normalized_urls):
+            raise HTTPException(422, "sourceUrls cannot contain empty URLs.")
+
+        with session.begin():
+            candidate = session.scalar(
+                select(Candidate).where(Candidate.id == candidate_id).with_for_update()
+            )
+            if candidate is None:
+                raise HTTPException(404, "Candidate not found.")
+            if candidate.status != "pending":
+                raise HTTPException(409, "Only pending candidates can be applied as updates.")
+            if candidate.relationship_type != "possible_update" or not candidate.related_incident_id:
+                raise HTTPException(409, "Only candidates linked as possible updates can be applied.")
+
+            incident = session.scalar(
+                select(Incident)
+                .where(Incident.id == candidate.related_incident_id)
+                .with_for_update()
+            )
+            if incident is None or incident.status != "published":
+                raise HTTPException(409, "The linked published incident is unavailable.")
+
+            # Only modified fields are written, so verified old values survive.
+            actual_updates = {
+                key: value for key, value in updates.items()
+                if getattr(incident, key) != value
+            }
+            candidate_url = safe_url(candidate.source_url)
+            existing_urls = {source.url.rstrip("/") for source in incident.sources}
+            if incident.source_url:
+                existing_urls.add(safe_url(incident.source_url).rstrip("/"))
+            additions = []
+            for url in [candidate_url, *normalized_urls]:
+                if url and url.rstrip("/") not in existing_urls:
+                    existing_urls.add(url.rstrip("/"))
+                    additions.append(url)
+            if not actual_updates and not additions:
+                raise HTTPException(422, "No new information to apply to the incident.")
+
+            before = {key: getattr(incident, key) for key in actual_updates}
+            if actual_updates:
+                update_incident(session, incident, actual_updates)
+            # Older imports may store the primary source on Incident only.
+            # Keep it visible in the related source list when applying an update.
+            if incident.source_url and all(
+                source.url.rstrip("/") != safe_url(incident.source_url).rstrip("/")
+                for source in incident.sources
+            ):
+                incident.sources.append(IncidentSource(url=incident.source_url))
+            for url in additions:
+                incident.sources.append(IncidentSource(url=url))
+            incident.updated_at = utcnow()
+
+            review = {
+                "candidateId": candidate.id,
+                "relatedIncidentId": incident.id,
+                "reviewedAt": iso(utcnow()),
+                "reason": reason.strip(),
+                "changes": {
+                    key: {"before": before[key], "after": value}
+                    for key, value in actual_updates.items()
+                },
+                "sourceUrlsAdded": additions,
+            }
+            raw_fields = dict(incident.raw_fields or {})
+            reviews = list(raw_fields.get("_updateReviews", []))
+            reviews.append(review)
+            raw_fields["_updateReviews"] = reviews
+            incident.raw_fields = raw_fields
+
+            evidence = dict(candidate.evidence or {})
+            relationship_reviews = list(evidence.get("relationshipReviews", []))
+            relationship_reviews.append({
+                "previousType": candidate.relationship_type,
+                "previousRelatedIncidentId": candidate.related_incident_id,
+                "previousReason": candidate.relationship_reason,
+                "decision": "applied_update",
+                "reason": reason.strip(),
+            })
+            evidence["relationshipReviews"] = relationship_reviews
+            candidate.evidence = evidence
+
+            # Conditional transition protects against duplicate review writes.
+            changed = session.execute(update(Candidate).where(
+                Candidate.id == candidate_id, Candidate.status == "pending"
+            ).values(status="approved", incident_id=incident.id)
+                .execution_options(synchronize_session=False))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
+            candidate.status = "approved"
+            candidate.incident_id = incident.id
+            session.flush()
+            result = {
+                "candidate": candidate_dict(candidate),
+                "incident": incident_dict(incident, details=True),
+            }
         return result
 
     @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
