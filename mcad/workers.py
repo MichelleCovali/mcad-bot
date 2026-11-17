@@ -16,10 +16,13 @@ from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .models import Candidate, Delivery, Incident, OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow
+from .models import (Candidate, CandidateDelivery, CandidateNotification, Delivery, Incident,
+                     OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow)
 from .service import safe_url
 from .candidate_alerts import deliver_candidate_one
-from .telegram_review import CallbackReply, is_authorized_review_callback, parse_preview_action
+from .telegram_review import (CallbackReply, REJECTION_REASONS, is_authorized_review_callback,
+                              parse_preview_action, parse_rejection_action,
+                              rejection_confirmation_keyboard, rejection_reason_keyboard)
 
 
 logger = logging.getLogger("mcad.workers")
@@ -115,7 +118,7 @@ class TelegramClient:
             return SendResult(False)
 
     def answer_callback(self, callback_id: str, message: str) -> None:
-        """Acknowledge preview button taps; never mutate incidents here."""
+        """Acknowledge a button tap; never expose the Telegram token in logs."""
         try:
             requests.post(
                 f"https://api.telegram.org/bot{self.token}/answerCallbackQuery",
@@ -199,7 +202,8 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
 HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nAI reports require human review. Historical imports do not send alerts."
 
 
-def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(), review_buttons_enabled=False):
+def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(),
+                   review_buttons_enabled=False, rejection_actions_enabled=False):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -223,6 +227,63 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 return CallbackReply(callback_id, "Telegram review is not enabled. Use the MCAD admin panel.")
             if not is_authorized_review_callback(callback, reviewer_ids):
                 return CallbackReply(callback_id, "Reviewer access is restricted.")
+            # Stage 3 handles confirmed, structured REJECTION only. Approval and
+            # corrections remain read-only previews until separately implemented.
+            rejection = parse_rejection_action(callback.get("data"))
+            if rejection is not None:
+                if not rejection_actions_enabled:
+                    return CallbackReply(callback_id, "Telegram rejection is disabled. Use the MCAD admin panel.")
+                stage, reason_key, candidate_id = rejection
+                chat_id = str(callback["from"]["id"])
+                # A reviewer must actually have received this specific candidate
+                # alert in their private subscription; knowing a UUID is not enough.
+                delivered = session.scalar(select(CandidateDelivery.id).join(
+                    CandidateNotification, CandidateDelivery.event_id == CandidateNotification.id
+                ).join(Subscriber, CandidateDelivery.chat_id == Subscriber.chat_id).where(
+                    CandidateNotification.candidate_id == candidate_id,
+                    CandidateDelivery.chat_id == chat_id,
+                    CandidateDelivery.status == "sent",
+                    Subscriber.active.is_(True),
+                ).limit(1))
+                if not delivered:
+                    return CallbackReply(callback_id, "This report was not delivered to your private subscription.")
+                if stage == "cancel":
+                    return CallbackReply(callback_id, "Rejection cancelled. No changes saved.")
+                candidate = session.scalar(select(Candidate).where(
+                    Candidate.id == candidate_id
+                ).with_for_update())
+                if (candidate is None or candidate.status != "pending" or candidate.baseline
+                        or candidate.origin != "ai" or candidate.verification_status != "supported"
+                        or candidate.relationship_type not in {"unclassified", "new_incident"}
+                        or candidate.related_incident_id is not None):
+                    return CallbackReply(callback_id, "This candidate cannot be rejected from Telegram. Review in the admin panel.")
+                if stage == "start":
+                    return CallbackReply(callback_id, "Select a rejection reason.", chat_id,
+                                         "Choose a rejection reason for: " + clean_text(candidate.title)[:240],
+                                         rejection_reason_keyboard(candidate_id))
+                reason, label = REJECTION_REASONS[reason_key]
+                if stage == "reason":
+                    return CallbackReply(callback_id, "Confirm or cancel your decision.", chat_id,
+                                         f"Reject '{clean_text(candidate.title)[:160]}' as {label}? "
+                                         "This will save the reason. To add detailed notes, use the web admin panel.",
+                                         rejection_confirmation_keyboard(candidate_id, reason_key))
+                # The state change is conditional, as in the admin API, to avoid
+                # double reviews or overwriting an approval from another interface.
+                changed = session.execute(update(Candidate).where(
+                    Candidate.id == candidate_id, Candidate.status == "pending"
+                ).values(status="rejected", rejection_reason=reason, rejection_notes="")
+                    .execution_options(synchronize_session=False))
+                if changed.rowcount != 1:
+                    return CallbackReply(callback_id, "This report was already reviewed. No changes saved.")
+                # Preserve a minimal audit trail for the client. No bot-token,
+                # message text or personal username is recorded.
+                evidence = dict(candidate.evidence or {})
+                history = list(evidence.get("telegramReviewHistory", []))
+                history.append({"decision": "rejected", "reason": reason,
+                                "reviewerId": chat_id, "reviewedAt": utcnow().isoformat() + "Z"})
+                evidence["telegramReviewHistory"] = history
+                candidate.evidence = evidence
+                return CallbackReply(callback_id, "Rejected: " + label + ". Saved in the MCAD review queue.")
             action = parse_preview_action(callback.get("data"))
             if action is None:
                 return CallbackReply(callback_id, "Unknown review action.")
@@ -230,8 +291,6 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
             candidate = session.get(Candidate, candidate_id)
             if candidate is None or candidate.status != "pending":
                 return CallbackReply(callback_id, "This report is no longer awaiting review.")
-            # Stage 2 is deliberately read-only. Stage 3 must use the existing
-            # API's verification, relationship and atomic status safeguards.
             return CallbackReply(callback_id, "Preview only: use the MCAD admin panel to review this report.")
         message = update_data.get("message") or {}
         chat = message.get("chat") or {}
@@ -337,7 +396,8 @@ class WorkerController:
                         deliver_candidate_one(self.factory, self.client, self.settings.public_base_url, self.owner,
                                               message_format=self.settings.telegram_message_format,
                                               reviewer_ids=self.settings.telegram_reviewer_ids,
-                                              review_buttons_enabled=self.settings.enable_telegram_review_buttons)
+                                              review_buttons_enabled=self.settings.enable_telegram_review_buttons,
+                                              rejection_actions_enabled=self.settings.enable_telegram_rejection_actions)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -362,9 +422,12 @@ class WorkerController:
                     self.factory, item, self.settings.public_base_url,
                     reviewer_ids=self.settings.telegram_reviewer_ids,
                     review_buttons_enabled=self.settings.enable_telegram_review_buttons,
+                    rejection_actions_enabled=self.settings.enable_telegram_rejection_actions,
                 )
                 if isinstance(reply, CallbackReply):
                     self.client.answer_callback(reply.callback_id, reply.text)
+                    if reply.chat_id and reply.message:
+                        self.client.send(reply.chat_id, reply.message, reply_markup=reply.reply_markup)
                 elif reply:
                     self.client.send(*reply)
                     self.stopped.wait(1.05)

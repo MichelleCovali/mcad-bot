@@ -36,6 +36,9 @@ from uuid import UUID
 class CallbackReply:
     callback_id: str
     text: str
+    chat_id: str | None = None
+    message: str | None = None
+    reply_markup: dict | None = None
 
 
 def preview_keyboard(candidate_id: str) -> dict | None:
@@ -61,3 +64,56 @@ def parse_preview_action(data: object) -> tuple[str, str] | None:
     if preview_keyboard(chunks[3]) is None:
         return None
     return chunks[2], chunks[3]
+
+
+# A separate opt-in flow for rejecting a *delivered* AI candidate. No web
+# approval, publishing, or classification updates can be triggered here.
+REJECTION_REASONS = {
+    "m": ("not_maritime", "Not maritime"),
+    "c": ("not_cyber", "Not a cyber incident"),
+    "d": ("duplicate", "Duplicate"),
+    "e": ("insufficient_evidence", "Insufficient evidence"),
+    "i": ("incorrect_information", "Incorrect information"),
+}
+
+
+def rejection_keyboard(candidate_id: str) -> dict | None:
+    """Show functional Reject and read-only Approve/Correct previews."""
+    markup = preview_keyboard(candidate_id)
+    if markup is None:
+        return None
+    markup["inline_keyboard"][0][1] = {
+        "text": "Reject (choose reason)",
+        "callback_data": f"mcad:r:start:{candidate_id}",
+    }
+    return markup
+
+
+def rejection_reason_keyboard(candidate_id: str) -> dict:
+    rows = [[{"text": label, "callback_data": f"mcad:r:reason:{key}:{candidate_id}"}]
+            for key, (_, label) in REJECTION_REASONS.items()]
+    rows.append([{"text": "Cancel", "callback_data": f"mcad:r:cancel:{candidate_id}"}])
+    return {"inline_keyboard": rows}
+
+
+def rejection_confirmation_keyboard(candidate_id: str, key: str) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "Confirm rejection", "callback_data": f"mcad:r:confirm:{key}:{candidate_id}"}],
+        [{"text": "Cancel", "callback_data": f"mcad:r:cancel:{candidate_id}"}],
+    ]}
+
+
+def parse_rejection_action(data: object) -> tuple[str, str | None, str] | None:
+    """Validate callback content and keep it below Telegram's 64-byte limit."""
+    if not isinstance(data, str) or len(data.encode("utf-8")) > 64:
+        return None
+    parts = data.split(":")
+    if len(parts) == 4 and parts[:2] == ["mcad", "r"] and parts[2] in {"start", "cancel"}:
+        stage, key, candidate_id = parts[2], None, parts[3]
+    elif len(parts) == 5 and parts[:2] == ["mcad", "r"] and parts[2] in {"reason", "confirm"} and parts[3] in REJECTION_REASONS:
+        stage, key, candidate_id = parts[2], parts[3], parts[4]
+    else:
+        return None
+    if preview_keyboard(candidate_id) is None:
+        return None
+    return stage, key, candidate_id
