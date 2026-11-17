@@ -150,7 +150,8 @@ def test_delivered_candidate_alert_does_not_repeat_on_human_publication(postgres
     alerted_chat = client.calls[0][0]
     settings = Settings(admin_api_token="ci-admin", enable_workers=False)
     with TestClient(create_app(settings, engine)) as api:
-        response = api.post(f"/api/admin/candidates/{candidate_id}/approve", json={"title": "Human-verified fictional incident", "year": 2025}, headers={"Authorization": "Bearer ci-admin"})
+        response = api.post(f"/api/admin/candidates/{candidate_id}/approve", json={"title": "Human-verified fictional incident", "year": 2025,
+            "referenceUrls": ["https://independent.example/incident"], "independentSourcesConfirmed": True}, headers={"Authorization": "Bearer ci-admin"})
         assert response.status_code == 200
     with factory() as session:
         queued_chats = list(session.scalars(select(Delivery.chat_id)))

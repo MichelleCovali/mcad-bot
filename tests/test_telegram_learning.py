@@ -12,7 +12,7 @@ from mcad.config import Settings
 from mcad.db import get_session_factory, make_engine
 from mcad.migrations import migrate
 from mcad.models import Candidate, Subscriber
-from mcad.prompt_learning import active_prompt
+from mcad.prompt_learning import active_prompt, propose_editorial_draft_once
 from mcad.service import upsert_incident
 from mcad.telegram_feedback import TelegramFeedback
 from mcad.workers import TelegramClient, deliver_one, process_update
@@ -98,6 +98,59 @@ def test_feedback_on_alert_keeps_url_and_verifies_recipient_and_message(isolated
 
 def model_json(result):
     return {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(result)}]}]}
+
+
+def test_editorial_rejection_is_used_for_an_automatic_draft_once(isolated_db, monkeypatch):
+    engine, factory = isolated_db
+    provider = Mock()
+    client_class = Mock(return_value=provider)
+    monkeypatch.setattr("mcad.ai_monitor.OpenAIResponsesClient", client_class)
+    with factory.begin() as session:
+        candidate = Candidate(title="Fictional port outage", summary="The proposal called it ransomware.", source_url=ARTICLE)
+        session.add(candidate)
+        session.flush()
+        candidate_id = candidate.id
+
+    explanation = "The sources confirmed a service outage but did not confirm ransomware."
+    with TestClient(create_app(settings(engine), engine)) as browser:
+        rejection = browser.post(f"/api/admin/candidates/{candidate_id}/reject", headers=ADMIN,
+            json={"reason": "other", "notes": explanation})
+        assert rejection.status_code == 200
+        entry, = browser.get(LEARNING, headers=ADMIN).json()["feedback"]
+        assert entry["editorialDecision"] is True
+        assert entry["reviewNotes"] == explanation
+        assert entry["status"] == "confirmed"
+
+    assert propose_editorial_draft_once(factory, settings(engine)) is None
+    client_class.assert_not_called()
+
+    def propose(payload):
+        inputs = json.loads(payload["input"][1]["content"])
+        if payload["text"]["format"]["name"] == "prompt_regression":
+            return model_json({"results": [{"caseId": inputs["cases"][0]["caseId"],
+                "verdict": "incorrect_information", "rationale": "Sources confirmed an outage only."}]})
+        example, = inputs["examples"]
+        assert example["evidence"] == "The proposal called it ransomware."
+        assert example["moderatorFacts"] == explanation
+        assert example["confirmedDecision"] == "other"
+        assert "tools" not in payload
+        return model_json({"summary": "Require attribution for ransomware claims",
+            "discoveryInstructions": "Distinguish outages from reported ransomware.",
+            "verificationInstructions": "Require independent sources for ransomware attribution."})
+
+    provider.create_response.side_effect = propose
+    enabled = settings(engine, enabled=True)
+    draft = propose_editorial_draft_once(factory, enabled)
+    assert draft["createdByAI"] and draft["pendingCases"] == 1
+    assert propose_editorial_draft_once(factory, enabled) is None
+    provider.create_response.assert_called_once()
+    with factory() as session:
+        case = session.get(TelegramFeedback, entry["id"])
+        assert case.editorial_drafted_at is not None
+        assert active_prompt(session)["versionId"] is None
+    with TestClient(create_app(enabled, engine)) as browser:
+        evaluate = browser.post(f"{LEARNING}/versions/{draft['id']}/evaluate", headers=ADMIN)
+        assert evaluate.json()["passedCases"] == 1
 
 
 def test_confirmed_cases_gate_activation_and_rollback_without_starting_search(isolated_db, monkeypatch):

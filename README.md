@@ -26,8 +26,10 @@ before preparing candidates in the same workbook structure. It is disabled by
 default: adding `OPENAI_API_KEY` or saving a schedule does not start a search.
 New, source-checked AI candidates notify subscribed Telegram chats once, while
 uncertain or potentially duplicate reports stay in the website queue. Publication
-still requires human approval. Telegram alerts retain their existing message text
-and can collect ratings and comments for moderated prompt regression cases.
+requires human approval and two independent sources. An internal Telegram review
+chat lets editors accept drafts or reject them with an explanation. Those decisions
+become regression cases for prompt improvements. Confirmed developments are added
+to the existing incident record.
 GitHub Actions checks every push and pull request; see [automated checks](docs/ci.md).
 
 ## Legacy local prototype

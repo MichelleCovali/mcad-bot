@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,8 @@ class Settings:
     admin_api_token: str = field(default="", repr=False)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_review_chat_id: str = ""
+    telegram_reviewer_ids: tuple[str, ...] = ()
     public_base_url: str = ""
     enable_workers: bool = True
     enable_feed_polling: bool = True
@@ -35,6 +38,15 @@ class Settings:
     def __post_init__(self):
         if self.telegram_message_format not in {"link", "rich"}:
             raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
+        if self.telegram_review_chat_id and not re.fullmatch(r"-?[1-9]\d{0,19}", self.telegram_review_chat_id):
+            raise ValueError("TELEGRAM_REVIEW_CHAT_ID must be a numeric Telegram chat ID.")
+        if any(not re.fullmatch(r"[1-9]\d{0,19}", user_id) for user_id in self.telegram_reviewer_ids):
+            raise ValueError("TELEGRAM_REVIEWER_IDS must contain numeric Telegram user IDs.")
+
+    @property
+    def telegram_review_enabled(self):
+        return bool(self.telegram_bot_token and self.enable_telegram_polling
+                    and self.telegram_review_chat_id and self.telegram_reviewer_ids)
 
     @classmethod
     def from_env(cls):
@@ -52,6 +64,9 @@ class Settings:
             admin_api_token=os.getenv("ADMIN_API_TOKEN", "").strip(),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_review_chat_id=os.getenv("TELEGRAM_REVIEW_CHAT_ID", "").strip(),
+            telegram_reviewer_ids=tuple(dict.fromkeys(
+                entry.strip() for entry in os.getenv("TELEGRAM_REVIEWER_IDS", "").split(",") if entry.strip())),
             telegram_message_format=os.getenv("TELEGRAM_MESSAGE_FORMAT", "link").strip().lower(),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
             enable_workers=env_bool("ENABLE_BACKGROUND_WORKERS", True),

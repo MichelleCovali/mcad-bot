@@ -36,7 +36,7 @@ def source(url, group):
 
 def discovery():
     return {"candidates": [{"title": "Fictional port incident", "summary": "Synthetic lead.",
-        "sourceUrls": [URL_A], "eventDate": None,
+        "sourceUrls": [URL_A], "eventDate": None, "development": None,
         "firstReportedAt": iso(utcnow() - timedelta(hours=1))}]}
 
 
@@ -48,7 +48,7 @@ def verification():
     return {"candidates": [{"fields": fields, "assessment": "supported",
         "firstReportedAt": iso(utcnow() - timedelta(hours=1)), "eventDate": None,
         "sources": [source(URL_A, "authority"), source(URL_B, "independent newsroom")],
-        "uncertainties": [], "contradictions": []}]}
+        "uncertainties": [], "contradictions": [], "development": None}]}
 
 
 def response(data, urls=(URL_A, URL_B), *, opened=False):

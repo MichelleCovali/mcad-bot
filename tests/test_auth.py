@@ -99,7 +99,8 @@ def test_reviewer_can_review_but_cannot_manage_people_or_settings(accounts):
             reviewer.post("/api/admin/import-workbook", json={}),
         ]
         assert all(response.status_code == 403 for response in blocked)
-        assert reviewer.post(f"/api/admin/candidates/{candidate_id}/approve", json={"title": "Verified incident"}).status_code == 200
+        assert reviewer.post(f"/api/admin/candidates/{candidate_id}/approve", json={"title": "Verified incident",
+            "referenceUrls": ["https://independent.example/evidence"], "independentSourcesConfirmed": True}).status_code == 200
         assert admin.patch(f"/api/admin/team/members/{admin_user['id']}", json={"active": False}).status_code == 409
         assert admin.patch(f"/api/admin/team/members/{user['id']}", json={"active": False}).status_code == 200
         assert reviewer.get("/api/admin/candidates").status_code == 401

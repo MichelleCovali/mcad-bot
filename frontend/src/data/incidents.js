@@ -175,6 +175,7 @@ export function validateIncidents(payload) {
       "locations",
       "organisations",
       "provenance",
+      "updates",
     ])
       if (Array.isArray(record[field])) incident[field] = record[field];
     if (Number.isInteger(record.yearEnd)) incident.yearEnd = record.yearEnd;

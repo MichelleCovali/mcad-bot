@@ -63,7 +63,8 @@ class ApplicationFlow(unittest.TestCase):
         sender = Sender()
         self.assertTrue(deliver_candidate_one(self.factory, sender))
         approved = self.client.post(f"/api/admin/candidates/{candidate['id']}/approve",
-            headers=self.auth, json={"title": "Human-reviewed fictional port incident", "year": utcnow().year})
+            headers=self.auth, json={"title": "Human-reviewed fictional port incident", "year": utcnow().year,
+                "referenceUrls": candidate["proposedFields"]["referenceUrls"], "independentSourcesConfirmed": True})
         self.assertEqual(approved.status_code, 200, approved.text)
         self.assertEqual(self.count(Delivery), 1)
         self.assertTrue(deliver_candidate_one(self.factory, sender))  # Remaining research alert cancels.

@@ -41,6 +41,7 @@ class TelegramFeedback(Base):
     review_notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     reviewed_at: Mapped[datetime | None]
+    editorial_drafted_at: Mapped[datetime | None]
 
 
 @dataclass(frozen=True)

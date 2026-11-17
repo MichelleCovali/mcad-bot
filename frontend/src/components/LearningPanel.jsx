@@ -11,7 +11,7 @@ function FeedbackCard({ item, busy, onReview }) {
   const [notes, setNotes] = useState("");
   const source = safeReferenceUrl(item.sourceUrl);
   return <li>
-    <div><strong>{item.title}</strong><small>{label(item.reason)} · {item.status} · {date(item.createdAt)}</small></div>
+    <div><strong>{item.title}</strong><small>{item.editorialDecision ? "Editorial rejection · " : ""}{label(item.reason)} · {date(item.createdAt)}</small></div>
     {source && <a href={source} target="_blank" rel="noopener noreferrer">Open report source ↗</a>}
     {item.comment && <p>{item.comment}</p>}
     {item.reviewNotes && <p className="workspace-muted">Reviewer notes: {item.reviewNotes}</p>}
@@ -39,7 +39,7 @@ function VersionResults({ client, id }) {
     }}>View case results</button>
     {error && <p className="inline-error" role="alert">{error}</p>}
     {view && (view.length ? <ul className="workspace-rows workspace-feedback">
-      {view.map((entry) => <li key={entry.caseId + ":" + entry.model}><strong>{entry.title}</strong><small>{label(entry.expected)} expected · {label(entry.actual)} returned · {entry.model}</small><p>{entry.rationale}</p></li>)}
+      {view.map((entry) => <li key={entry.caseId + ":" + entry.model}><strong>{entry.title}</strong><small>{entry.passed ? "Passed" : "Failed"} · {entry.expected === "other" ? "Rejection expected" : `${label(entry.expected)} expected`} · {label(entry.actual)} returned · {entry.model}</small><p>{entry.rationale}</p></li>)}
     </ul> : <p className="workspace-muted">No results yet.</p>)}
   </div>;
 }
@@ -73,20 +73,20 @@ export function LearningPanel({ client }) {
     {message && <p className="success-message" role="status">{message}</p>}
     {!data ? <p role="status">{error ? "Feedback is unavailable." : "Loading feedback and versions…"}</p> : <>
       <div className="workspace-stats">
-        <div className="workspace-card workspace-stat"><p>Awaiting feedback review</p><strong>{data.pendingFeedbackCount}</strong><small>Ratings from delivered Telegram alerts</small></div>
+        <div className="workspace-card workspace-stat"><p>Awaiting feedback review</p><strong>{data.pendingFeedbackCount}</strong><small>Earlier ratings that still need a decision</small></div>
         <div className="workspace-card workspace-stat"><p>Confirmed regression cases</p><strong>{data.regressionCaseCount}</strong><small>Verified facts to replay before release</small></div>
         <div className="workspace-card workspace-stat"><p>Prompt in use</p><strong>{active ? "Custom" : "Built-in"}</strong><small>{active?.summary || "Default MCAD instructions"}</small></div>
       </div>
       <section className="workspace-card">
-        <h2>Telegram feedback</h2>
-        <p className="workspace-muted">Confirm ratings against the original reports. Confirmed cases are copied into the prompt regression suite. A rating alone does not change what goes live.</p>
-        {!data.feedback.length ? <p>No Telegram feedback yet.</p> : <ul className="workspace-rows workspace-feedback">
+        <h2>Editorial feedback</h2>
+        <p className="workspace-muted">Rejections from the editorial Telegram chat and the review queue are saved with the editor’s explanation.</p>
+        {!data.feedback.length ? <p>No editorial feedback yet.</p> : <ul className="workspace-rows workspace-feedback">
           {data.feedback.map((item) => <FeedbackCard key={item.id} item={item} busy={busy} onReview={(id, payload) => act(() => client.reviewFeedback(id, payload), payload.status === "confirmed" ? "Feedback confirmed and added to regression cases." : "Feedback dismissed.")} />)}
         </ul>}
       </section>
       <section className="workspace-card" id="prompt-draft">
         <h2>Draft a prompt update</h2>
-        <p className="workspace-muted">Keep the existing research checks and add targeted instructions to address recurring errors. AI suggestions and evaluation use bounded, explicit requests; neither starts a live search.</p>
+        <p className="workspace-muted">When enabled, AI uses recent editorial rejections to draft changes to the search and verification prompts. Review and evaluate a draft before activating it.</p>
         {!data.aiEnabled && <p className="workspace-muted">AI proposal and evaluation are paused by the server. You can still review feedback and save a draft.</p>}
         <button type="button" className="secondary-action" disabled={busy || !data.aiEnabled || !data.regressionCaseCount} onClick={() => act(() => client.proposeVersion(), "AI suggestion saved as a draft for review.")}>Suggest an update with AI</button>
         <form className="workspace-stack" style={{ marginTop: "1rem" }} onSubmit={(e) => {

@@ -20,6 +20,7 @@ from .models import Candidate, Delivery, Incident, OutboxEvent, ProcessedUpdate,
 from .service import safe_url
 from .candidate_alerts import deliver_candidate_one
 from .telegram_feedback import CallbackAnswer, record_callback, record_comment, send_notification
+from .telegram_review import REVIEW_CALLBACK_PREFIX, record_rejection, record_review_callback
 
 
 logger = logging.getLogger("mcad.workers")
@@ -101,6 +102,9 @@ class TelegramClient:
         if self.feedback_enabled:
             return self._send(chat_id, text, reply_markup=markup)
         return self.send(chat_id, text)
+
+    def send_with_review(self, chat_id, text, markup):
+        return self._send(chat_id, text, reply_markup=markup)
 
     def _send(self, chat_id, text, **options):
         try:
@@ -199,10 +203,10 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
     return True
 
 
-HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nRate an alert using its feedback buttons. To leave a comment, reply to that alert with /feedback followed by your comment.\n\nAI reports require human review. Historical imports do not send alerts."
+HELP = "MCAD incident alerts\n\n/subscribe — receive MCAD alerts\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nHistorical imports do not send alerts."
 
 
-def process_update(factory, update_data, base_url=""):
+def process_update(factory, update_data, base_url="", *, settings=None):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -219,6 +223,9 @@ def process_update(factory, update_data, base_url=""):
             session.add(WorkerState(name="telegram_offset", value={"offset": next_offset}))
         callback = update_data.get("callback_query")
         if isinstance(callback, dict):
+            data = callback.get("data")
+            if isinstance(data, str) and data.startswith(REVIEW_CALLBACK_PREFIX):
+                return record_review_callback(session, callback, settings)
             return record_callback(session, callback)
         message = update_data.get("message") or {}
         chat = message.get("chat") or {}
@@ -226,12 +233,14 @@ def process_update(factory, update_data, base_url=""):
         command = text.split()[0].lower().split("@")[0] if isinstance(text, str) and text.strip() else ""
         if command == "/feedback":
             return record_comment(session, message)
+        if command == "/reject":
+            return record_rejection(session, message, settings)
         if chat.get("type") != "private" or not isinstance(chat.get("id"), int):
             return None
         chat_id = str(chat["id"])
         if command == "/subscribe":
             set_subscription(session, chat_id, True)
-            reply = "Subscribed. You will receive new source-checked AI reports and published MCAD incidents. AI reports require human review. Historical records are not sent."
+            reply = "Subscribed. You will receive MCAD incident alerts. Historical records are not sent."
         elif command == "/unsubscribe":
             set_subscription(session, chat_id, False)
             reply = "Unsubscribed. MCAD incident alerts are stopped."
@@ -280,8 +289,7 @@ class WorkerController:
         self.owner = str(uuid4())
         self.stopped = threading.Event()
         self.threads = []
-        self.client = TelegramClient(settings.telegram_bot_token,
-            feedback_enabled=settings.enable_telegram_polling) if settings.telegram_bot_token else None
+        self.client = TelegramClient(settings.telegram_bot_token, feedback_enabled=False) if settings.telegram_bot_token else None
 
     def start(self):
         jobs = []
@@ -293,6 +301,8 @@ class WorkerController:
             jobs.append(("feed_polling", self._feed_loop))
         if self.settings.enable_ai_search:
             jobs.append(("ai_monitor", self._ai_loop))
+        if self.settings.enable_ai_feedback and self.settings.openai_api_key:
+            jobs.append(("prompt_feedback", self._prompt_feedback_loop))
         for name, target in jobs:
             thread = threading.Thread(name=f"mcad-{name}", target=self._guard, args=(name, target), daemon=True)
             thread.start()
@@ -324,8 +334,9 @@ class WorkerController:
                     sent = deliver_one(self.factory, self.client, self.settings.public_base_url, self.owner,
                                        message_format=self.settings.telegram_message_format)
                     if not sent:
+                        review_chat = self.settings.telegram_review_chat_id if self.settings.telegram_review_enabled else ""
                         deliver_candidate_one(self.factory, self.client, self.settings.public_base_url, self.owner,
-                                              message_format=self.settings.telegram_message_format)
+                                              message_format=self.settings.telegram_message_format, review_chat_id=review_chat)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -346,7 +357,7 @@ class WorkerController:
             for item in data.get("result", []):
                 if self.stopped.is_set() or not claim_lease(self.factory, "telegram_polling", self.owner):
                     break
-                reply = process_update(self.factory, item, self.settings.public_base_url)
+                reply = process_update(self.factory, item, self.settings.public_base_url, settings=self.settings)
                 if isinstance(reply, CallbackAnswer):
                     self.client.answer_callback(reply.query_id, reply.text)
                 elif reply:
@@ -385,4 +396,18 @@ class WorkerController:
                 pass
             except Exception:
                 logger.warning("MCAD AI monitor temporarily unavailable; check administrator run history.")
+            self.stopped.wait(60)
+
+    def _prompt_feedback_loop(self):
+        from fastapi import HTTPException
+        from .prompt_learning import propose_editorial_draft_once
+
+        while not self.stopped.is_set():
+            try:
+                propose_editorial_draft_once(self.factory, self.settings)
+            except HTTPException as error:
+                if error.status_code not in {409, 429}:
+                    logger.warning("MCAD prompt feedback temporarily unavailable; retrying later.")
+            except Exception:
+                logger.warning("MCAD prompt feedback temporarily unavailable; retrying later.")
             self.stopped.wait(60)

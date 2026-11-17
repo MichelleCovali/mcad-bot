@@ -11,13 +11,13 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .models import Candidate, CandidateDelivery, CandidateNotification, Subscriber, utcnow
+from .models import Candidate, CandidateDelivery, CandidateNotification, Incident, Subscriber, utcnow
 from .service import safe_url
 from .telegram_feedback import send_notification
 
 
-def create_candidate_notification(session, candidate):
-    """Snapshot a newly created, supported AI report for current subscribers.
+def create_candidate_notification(session, candidate, review_chat_id=""):
+    """Queue a supported AI draft for the review chat or legacy subscribers.
 
     The caller owns the transaction containing the new candidate. Repeating this
     function never creates another event, adds new recipients, or sends HTTP.
@@ -30,21 +30,31 @@ def create_candidate_notification(session, candidate):
         return None
     now, event_id = utcnow(), str(uuid4())
     insert = postgres_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
+    payload = {"candidateId": candidate.id, "title": candidate.title,
+               "sourceUrl": source_url, "verificationStatus": "supported", "reviewRequired": True}
+    if review_chat_id:
+        payload["reviewChatId"] = review_chat_id
     inserted_id = session.scalar(insert(CandidateNotification).values(
         id=event_id, candidate_id=candidate.id, created_at=now,
-        payload={"candidateId": candidate.id, "title": candidate.title,
-                 "sourceUrl": source_url, "verificationStatus": "supported", "reviewRequired": True},
+        payload=payload,
     ).on_conflict_do_nothing(index_elements=["candidate_id"]).returning(CandidateNotification.id))
     event = session.scalar(select(CandidateNotification).where(CandidateNotification.candidate_id == candidate.id))
     # psycopg can report an unknown (-1) rowcount for INSERT; RETURNING
     # distinguishes a new event from a conflict on both supported databases.
     if inserted_id is None:
         return event
-    for subscriber in session.scalars(select(Subscriber).where(
-        Subscriber.active.is_(True), Subscriber.subscribed_at <= event.created_at,
-    )):
-        session.add(CandidateDelivery(event_id=event.id, chat_id=subscriber.chat_id,
-                                      next_attempt_at=event.created_at))
+    if review_chat_id:
+        # The delivery table references Subscriber. The internal review destination
+        # does not acquire a public subscription just by receiving drafts.
+        session.execute(insert(Subscriber).values(chat_id=review_chat_id, source="review",
+            active=False, subscribed_at=now, updated_at=now).on_conflict_do_nothing(index_elements=["chat_id"]))
+        destinations = [review_chat_id]
+    else:
+        destinations = session.scalars(select(Subscriber.chat_id).where(
+            Subscriber.active.is_(True), Subscriber.subscribed_at <= event.created_at,
+        ))
+    for chat_id in destinations:
+        session.add(CandidateDelivery(event_id=event.id, chat_id=chat_id, next_attempt_at=event.created_at))
     session.flush()
     return event
 
@@ -90,7 +100,7 @@ def candidate_notification_text(payload, base_url="", message_format="link"):
     return "\n".join(lines)[:4096]
 
 
-def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link"):
+def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link", *, review_chat_id=""):
     if message_format not in {"link", "rich"}:
         raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
     owner, now = owner or str(uuid4()), now or utcnow()
@@ -118,22 +128,39 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
             return True
         event = session.get(CandidateNotification, delivery.event_id)
         subscriber = session.get(Subscriber, delivery.chat_id)
-        active = bool(subscriber and subscriber.active and subscriber.subscribed_at <= event.created_at)
+        editorial_chat = event.payload.get("reviewChatId")
+        if editorial_chat:
+            active = editorial_chat == review_chat_id == delivery.chat_id
+        else:
+            active = bool(not review_chat_id and subscriber and subscriber.active and subscriber.subscribed_at <= event.created_at)
         reviewable = bool(candidate and candidate.status == "pending" and candidate.origin == "ai"
                           and candidate.verification_status == "supported" and not candidate.baseline)
         delivery.lease_until, delivery.lease_owner = None, None
         if not active or not reviewable:
             delivery.status = "cancelled"
-            delivery.last_error = "unsubscribed" if not active else "candidate_not_pending"
+            if not reviewable:
+                delivery.last_error = "candidate_not_pending"
+            elif editorial_chat or review_chat_id:
+                delivery.last_error = "review_chat_changed"
+            else:
+                delivery.last_error = "unsubscribed"
             return True
-        result = send_notification(client, delivery.chat_id,
-            candidate_notification_text(event.payload, base_url, message_format), "c", delivery.id)
+        if editorial_chat:
+            from .telegram_review import review_notification
+
+            target_id = (candidate.evidence or {}).get("suggestedIncidentId")
+            target = session.get(Incident, target_id) if target_id else None
+            text, markup = review_notification(candidate, delivery.id, base_url, target.title if target else None)
+            result = client.send_with_review(delivery.chat_id, text, markup)
+        else:
+            result = send_notification(client, delivery.chat_id,
+                candidate_notification_text(event.payload, base_url, message_format), "c", delivery.id)
         if result.ok:
             delivery.status, delivery.sent_at = "sent", now
             delivery.telegram_message_id, delivery.last_error = result.message_id, None
         elif result.error_code in {400, 403}:
             delivery.status, delivery.last_error = "failed", f"telegram_{result.error_code}"
-            if result.error_code == 403:
+            if result.error_code == 403 and not editorial_chat:
                 subscriber.active = False
         else:
             delivery.status = "retry"

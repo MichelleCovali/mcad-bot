@@ -202,6 +202,16 @@ body:has(.workspace), body:has(.workspace-loading) {
   gap: 8px;
   margin-top: 14px;
 }
+.workspace-main .review-confirmation {
+  display: flex;
+  align-items: start;
+  gap: 9px;
+  margin: 12px 0;
+}
+.workspace-main .review-confirmation input {
+  flex: 0 0 16px;
+  margin: 1px 0 0;
+}
 .workspace-main input[type="checkbox"] {
   width: 16px;
   min-height: 16px;

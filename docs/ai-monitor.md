@@ -15,7 +15,7 @@ There are two independent switches:
 1. The server environment variable `ENABLE_AI_SEARCH` defaults to `false`.
 2. The saved administrator setting `enabled` also defaults to `false`.
 
-Both switches and a configured key are required for any paid request, including a manual
+Both switches and a configured key are required for any paid search, including a manual
 run. The server blocks enabling the saved switch while its environment switch is off.
 Later activation must be intentional: enable the server switch, then enable monitoring
 in the administrator settings. A background schedule additionally requires
@@ -67,14 +67,13 @@ story from the same origin, missing freshness, or search snippets alone remains
 excluded. Source independence and quoted claims still require human judgement: an
 opened URL proves the research trail, not that every model claim is correct.
 
-**Every result is a pending candidate. The monitor cannot publish an incident.** A new
-`supported` candidate creates a durable review notification for existing Telegram
-subscribers in the same transaction. The normal message remains its source URL;
-the optional rich format explicitly says human review is required. `needs_review`,
-`contradicted`, baseline and already-known reports do not trigger research alerts.
-An administrator checks the evidence, edits the proposed MCAD fields, and explicitly
-approves or rejects it. Rejection feedback is stored for review
-and future prompt context; this is not model fine-tuning.
+Every result is a pending candidate. A new `supported` candidate creates a durable
+editorial Telegram alert when the review chat is configured. The editor sees the
+proposed description and links, then accepts it or replies with `/reject` and an
+explanation. Reports marked `needs_review` or `contradicted` remain in the web queue.
+Publication in either surface requires at least two independent reporting origins.
+Explained rejections become confirmed regression cases for the prompt workflow.
+See [the operations guide](operations.md) for the review chat configuration.
 
 Candidate proposals follow the Excel incident structure. Unknown facts remain empty or
 `null`; dates keep their source precision, coordinates are not guessed, and the AI cannot
@@ -83,12 +82,12 @@ contradictions, uncertainties, reporting dates, the research time and run ID are
 Publication records the reviewed proposal and evidence snapshot. Existing Excel import
 behaviour and the current Telegram message format are unchanged.
 
-Repeated title/year pairs and already-seen source sets are held back. A distinct event
-may share a background reference with a known incident if it has a new source URL;
-it then stays in manual review without a Telegram alert until its identity is resolved.
-Known analytics URL parameters are ignored when comparing sources. The same title with
-an unknown year is held back for identity review rather than treated as a new event.
-This is conservative duplicate prevention, not a complete event-identity resolver.
+Discovery distinguishes a new incident from a fresh development in an older incident.
+An update must contain new facts corroborated by two independent sources. Reference
+overlap and matching incident details can suggest a target. A reviewer resolves
+uncertain matches. Approved updates keep the original record and extend its published
+history and references. Reposted facts stay out of the review queue. Known analytics
+URL parameters are ignored when comparing sources.
 
 Research alerts use their own durable outbox and per-recipient delivery state. Temporary
 Telegram failures retry with backoff; opt-outs and reviewed reports cancel unsent research

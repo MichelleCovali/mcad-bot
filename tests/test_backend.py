@@ -200,10 +200,12 @@ class ApiBehaviour(BackendCase):
     def test_validation_mapped_unmapped_details_and_edits(self):
         for bad in [{"title": "Bad", "latitude": 50}, {"title": "Bad", "latitude": 95, "longitude": 10}, {"title": "Bad", "year": 5000}, {"title": "Bad", "sourceUrl": "javascript:alert(1)"}]:
             self.assertEqual(self.client.post("/api/incidents", json=bad, headers=self.auth).status_code, 422)
-        result = self.client.post("/api/incidents", json={"title": "Mapped fixture", "latitude": 52, "longitude": 4, "rawFields": {"Original": "Retained"}}, headers=self.auth)
+        result = self.client.post("/api/incidents", json={"title": "Mapped fixture", "latitude": 52, "longitude": 4, "rawFields": {"Original": "Retained"},
+            "sourceUrl": "https://authority.example/mapped", "referenceUrls": ["https://press.example/mapped"], "independentSourcesConfirmed": True}, headers=self.auth)
         self.assertEqual(result.status_code, 201)
         identifier = result.json()["id"]
-        self.client.post("/api/incidents", json={"title": "Unknown location", "latitude": None, "longitude": None}, headers=self.auth)
+        self.client.post("/api/incidents", json={"title": "Unknown location", "latitude": None, "longitude": None,
+            "sourceUrl": "https://authority.example/unmapped", "referenceUrls": ["https://press.example/unmapped"], "independentSourcesConfirmed": True}, headers=self.auth)
         listing = self.client.get("/api/incidents").json()
         self.assertEqual(listing["meta"]["mapped"], 1)
         self.assertEqual(listing["meta"]["unmapped"], 1)
@@ -217,7 +219,8 @@ class ApiBehaviour(BackendCase):
         candidate = self.client.get("/api/admin/candidates", headers=self.auth).json()["items"][0]
         url = f"/api/admin/candidates/{candidate['id']}/approve"
         self.assertEqual(self.client.post(url, json={}, headers=self.auth).status_code, 422)
-        result = self.client.post(url, json={"title": "Verified fixture", "year": 2020, "incidentCountry": "Netherlands"}, headers=self.auth)
+        result = self.client.post(url, json={"title": "Verified fixture", "year": 2020, "incidentCountry": "Netherlands",
+            "referenceUrls": ["https://independent.example/candidate"], "independentSourcesConfirmed": True}, headers=self.auth)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(self.client.post(url, json={"title": "Verified fixture"}, headers=self.auth).json()["id"], result.json()["id"])
         self.assertEqual(self.count(Incident), 1)

@@ -10,6 +10,7 @@ from .v0004_candidate_alerts import upgrade as candidate_alerts
 from .v0005_admin_accounts import upgrade as admin_accounts
 from .v0006_telegram_learning import upgrade as telegram_learning
 from .v0007_discovery_operations import upgrade as discovery_operations
+from .v0008_editorial_learning import upgrade as editorial_learning
 
 MIGRATIONS = [
     (1, initial_schema),
@@ -19,6 +20,7 @@ MIGRATIONS = [
     (5, admin_accounts),
     (6, telegram_learning),
     (7, discovery_operations),
+    (8, editorial_learning),
 ]
 
 def migrate(engine):

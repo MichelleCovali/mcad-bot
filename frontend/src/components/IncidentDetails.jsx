@@ -132,6 +132,21 @@ export function IncidentDetails({ incident, loading, error, onShowMap, onCopyLin
         )}
         {copyState && <span role="status">{copyState}</span>}
       </div>
+      {incident.updates?.length > 0 && <section className="detail-section">
+        <h3>Incident updates</h3>
+        <ul>{incident.updates.map((entry, index) => {
+          const date = new Date(entry.reportedAt || entry.publishedAt);
+          const label = Number.isNaN(date.valueOf()) ? "Verified update" : `Verified update · ${date.toLocaleDateString()}`;
+          const sources = (entry.sourceUrls ?? []).map(safeReferenceUrl).filter(Boolean);
+          return <li key={entry.candidateId || index}>
+            <h4>{label}</h4>
+            <p className="incident-summary">{entry.summary}</p>
+            {sources.length > 0 && <ul>{sources.map((url) => <li key={url}>
+              <a className="reference-link" href={url} target="_blank" rel="noopener noreferrer">{url}</a>
+            </li>)}</ul>}
+          </li>;
+        })}</ul>
+      </section>}
       {(sourceUrl || references.length > 0) && (
         <section className="detail-section">
           <h3>References</h3>

@@ -20,6 +20,7 @@ export interface Incident {
   countryFacets?: Partial<Record<"incidentCountry" | "victimCountry" | "attackerCountry", string[]>>;
   rawFields?: Record<string, unknown>;
   sources?: Array<{ url: string; shortName?: string; rawText?: string }>;
+  updates?: Array<{ candidateId: string; publishedAt: string; reportedAt?: string; summary: string; sourceUrls: string[] }>;
 }
 export type IncidentFilterField =
   | "all"

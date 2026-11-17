@@ -7,7 +7,7 @@ records with no coordinates in the list.
 
 ## First sign-in
 
-1. Deploy a release with schema migrations 5–7. The production image applies
+1. Deploy a release with schema migrations 5–8. The production image applies
    migrations on startup; take a database backup before the first deployment.
 2. In an interactive shell on the deployed Railway `mcad-web` service, run
    `python -m mcad create-admin --email name@example.com`. Enter a unique
@@ -59,18 +59,25 @@ warning does not stop spending. Cost per approved incident uses priced runs
 started that UTC day and their approved results. Run and tool limits still
 constrain requests independently.
 
-Telegram alerts retain the existing link text and add rating buttons when
-Telegram polling is enabled and the configured chat identity is numeric.
-In private and group chats, a recipient can also reply to a rated alert with
-`/feedback some context`. **Feedback & prompts** lets administrators confirm
-the original facts and save a regression case. No rating directly rewrites a
-prompt.
+Set `TELEGRAM_REVIEW_CHAT_ID` to the numeric ID of a private chat or internal
+group, and `TELEGRAM_REVIEWER_IDS` to the comma-separated numeric Telegram user
+IDs allowed to moderate there. Add the bot to the chat and enable background
+workers and polling. Candidate alerts show the proposed description and sources.
+Editors can accept a verified report or reply to its message with `/reject`
+and an explanation. The public Telegram feed keeps its link format.
 
-Keep `ENABLE_AI_FEEDBACK=false` unless paid prompt proposals and evaluation
-are authorised. This separate switch, plus a server API key, permits explicit
-admin-only proposals and replay of stored cases. It never enables live search.
-Case replay uses frozen evidence and moderator facts without web tools; the
-backend compares results to the recorded expected decisions. Before activating
-a version, all confirmed cases must pass. Administrators can restore a
-previously active version or the built-in prompt. Replay measures known
-failure cases and does not measure the complete live search pipeline.
+Publication requires sources from at least two independent reporting origins.
+Reprints of the same report count as one. In the web queue, editors confirm
+the supporting sources before publishing. For a follow-up, compare the proposed
+match and choose the existing incident to update. The new facts and references
+appear on the original record. A follow-up must have independent support for
+its new facts.
+
+When an editor rejects a draft, the original proposal and explanation are
+saved together as a confirmed regression case. With `ENABLE_AI_FEEDBACK=true`,
+an API key and background workers, the server batches new editorial rejections
+into prompt drafts. **Feedback & prompts** also supports an explicit draft request
+and evaluation. Case replay uses the saved evidence and editor's explanation
+without web tools. An administrator activates a version after all confirmed cases
+pass. Previous versions and the built-in prompt are available for rollback.
+`ENABLE_AI_FEEDBACK` and `ENABLE_AI_SEARCH` are independent paid features.
