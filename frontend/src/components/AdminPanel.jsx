@@ -11,6 +11,7 @@ import {
 import { AIMonitorSettings } from "./AIMonitorSettings.jsx";
 import { TelegramSettings } from "./TelegramSettings.jsx";
 import { CandidateRelationship } from "./CandidateRelationship.jsx";
+import { ApplyCandidateUpdate } from "./ApplyCandidateUpdate.jsx";
 
 const fields = [
   ["title", "Title", true],
@@ -319,6 +320,29 @@ export function AdminPanel({ onChanged }) {
         "Marked as a separate incident. Nothing has been published. " +
           "Review the evidence and incident details before publishing.",
       );
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyExistingUpdate(payload) {
+    if (busy || !selected || selected.status !== "pending") return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await client.applyUpdate(selected.id, payload);
+      setCandidates((rows) => rows.filter((row) => row.id !== selected.id));
+      setSelected(null);
+      setValues({});
+      setRelationshipReason("");
+      setMessage(
+        "Verified update applied to the existing incident. No duplicate was published.",
+      );
+      onChanged?.(result.incident);
+      await refreshAfterSave();
     } catch (failure) {
       setError(failure.message);
     } finally {
@@ -666,6 +690,16 @@ export function AdminPanel({ onChanged }) {
           )}
           {selected && <EvidenceDetails candidate={selected} />}
           {selected && <CandidateRelationship candidate={selected} />}
+          {selected?.status === "pending" &&
+            selected.relationshipType === "possible_update" &&
+            selected.relatedIncidentId && (
+              <ApplyCandidateUpdate
+                candidate={selected}
+                client={client}
+                busy={busy || showRejectForm}
+                onApply={applyExistingUpdate}
+              />
+            )}
           {selected?.status === "pending" && relationshipBlocked && (
             <section className="candidate-evidence">
               <h3>Does this report describe a separate incident?</h3>

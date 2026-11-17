@@ -10,6 +10,10 @@ export function CandidateRelationship({ candidate }) {
 
   const type = candidate.relationshipType ?? "unclassified";
   const relatedId = candidate.relatedIncidentId;
+  const updateApplied = candidate.status === "approved" &&
+    candidate.evidence?.relationshipReviews?.some(
+      (review) => review.decision === "applied_update",
+    );
 
   return (
     <section className="candidate-evidence">
@@ -17,10 +21,18 @@ export function CandidateRelationship({ candidate }) {
 
       <p>
         <strong>
-          {relationshipLabels[type] ?? "Relationship needs review"}
+          {updateApplied
+            ? "Verified update applied to existing incident"
+            : (relationshipLabels[type] ?? "Relationship needs review")}
         </strong>
       </p>
 
+      {updateApplied && (
+        <p className="admin-help">
+          A reviewer applied verified changes to the linked incident. The
+          original candidate relationship is retained for the audit trail.
+        </p>
+      )}
       <p>
         {candidate.relationshipReason ||
           "No matching explanation has been recorded."}
@@ -38,7 +50,7 @@ export function CandidateRelationship({ candidate }) {
         </p>
       )}
 
-      {(type === "possible_update" ||
+      {!updateApplied && (type === "possible_update" ||
         type === "possible_duplicate" ||
         relatedId) && (
         <p className="admin-help">

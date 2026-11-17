@@ -298,6 +298,12 @@ export function createAdminClient(
     },
     catalogs: ({ signal } = {}) => request("/admin/catalogs", { signal }),
     candidate: (id) => request(`/admin/candidates/${encodeURIComponent(id)}`),
+    incident: (id) => request(`/incidents/${encodeURIComponent(id)}`),
+    applyUpdate: (id, payload) =>
+      request(`/admin/candidates/${encodeURIComponent(id)}/apply-update`, {
+        method: "POST",
+        body: payload,
+      }),
     resolveRelationship: (id, decision, reason) =>
       request(`/admin/candidates/${encodeURIComponent(id)}/relationship`, {
         method: "POST",
