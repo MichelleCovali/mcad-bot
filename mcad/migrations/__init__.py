@@ -7,12 +7,20 @@ from .v0001_initial import upgrade as initial_schema
 from .v0002_candidate_feedback import upgrade as candidate_feedback
 from .v0003_ai_monitor import upgrade as ai_monitor
 from .v0004_candidate_alerts import upgrade as candidate_alerts
+from .v0005_admin_accounts import upgrade as admin_accounts
+from .v0006_telegram_learning import upgrade as telegram_learning
+from .v0007_discovery_operations import upgrade as discovery_operations
+from .v0008_editorial_learning import upgrade as editorial_learning
 
 MIGRATIONS = [
     (1, initial_schema),
     (2, candidate_feedback),
     (3, ai_monitor),
     (4, candidate_alerts),
+    (5, admin_accounts),
+    (6, telegram_learning),
+    (7, discovery_operations),
+    (8, editorial_learning),
 ]
 
 def migrate(engine):

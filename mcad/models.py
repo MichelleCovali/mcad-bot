@@ -255,6 +255,9 @@ class AIConfig(Base):
     lookback_hours: Mapped[int] = mapped_column(Integer, default=48)
     max_candidates: Mapped[int] = mapped_column(Integer, default=5)
     max_tool_calls: Mapped[int] = mapped_column(Integer, default=15)
+    cost_rates: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    daily_warning_micros: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    scope_focus: Mapped[str] = mapped_column(String(350), default="", server_default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -271,6 +274,15 @@ class AIRun(Base):
     web_search_calls: Mapped[int] = mapped_column(Integer, default=0)
     response_ids: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stages: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    skipped_leads: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    prompt_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class DiscoveryCache(Base):
+    __tablename__ = "ai_discovery_cache"
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
 
 
 class ProcessedUpdate(Base):

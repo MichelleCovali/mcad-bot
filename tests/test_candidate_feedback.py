@@ -13,6 +13,11 @@ from mcad.config import Settings
 from mcad.db import get_session_factory, make_engine
 from mcad.migrations import migrate
 from mcad.models import AIConfig, Candidate, Delivery, ImportBatch, Incident, OutboxEvent, SchemaVersion, utcnow
+from mcad.service import upsert_incident
+
+
+VERIFIED_CITATIONS = {"referenceUrls": ["https://authority.example/review", "https://press.example/review"],
+                      "independentSourcesConfirmed": True}
 
 
 class CandidateFeedback(unittest.TestCase):
@@ -45,13 +50,13 @@ class CandidateFeedback(unittest.TestCase):
         return self.client.post(f"/api/admin/candidates/{self.candidate_id}/reject", json=payload if payload is not None else {"reason": "insufficient_evidence", "notes": "  Source does not confirm an attack.  "}, headers=kwargs.get("headers", self.headers))
 
     def approve(self, payload=None):
-        return self.client.post(f"/api/admin/candidates/{self.candidate_id}/approve", json=payload or {"title": "Human-reviewed fictional incident"}, headers=self.headers)
+        return self.client.post(f"/api/admin/candidates/{self.candidate_id}/approve", json=payload or {"title": "Human-reviewed fictional incident", **VERIFIED_CITATIONS}, headers=self.headers)
 
     def test_feedback_requires_authentication_and_valid_text(self):
         self.assertEqual(self.reject(headers={}).status_code, 401)
         self.assertEqual(self.client.get("/api/admin/candidates?status=rejected").status_code, 401)
         self.assertEqual(self.client.get("/api/admin/catalogs").status_code, 401)
-        for payload in ([], "reason", {}, {"reason": []}, {"reason": "invalid"}, {"reason": "other", "notes": []}, {"reason": "other", "notes": "x" * 2001}):
+        for payload in ([], "reason", {}, {"reason": []}, {"reason": "invalid"}, {"reason": "other", "notes": []}, {"reason": "other", "notes": "   "}, {"reason": "other", "notes": "x" * 2001}):
             with self.subTest(payload_type=type(payload).__name__):
                 self.assertEqual(self.reject(payload).status_code, 422)
         with self.factory() as session:
@@ -109,7 +114,7 @@ class CandidateFeedback(unittest.TestCase):
             candidate.proposed_fields = {"title": "Unreviewed proposed title", "method": "Unreviewed proposed method"}
             candidate.evidence = evidence
             candidate.verification_status = "needs_review"
-        response = self.approve({"title": "Human-reviewed title", "rawFields": {"humanNote": "Confirmed manually", "_aiReview": {"evidence": "tampered"}}})
+        response = self.approve({"title": "Human-reviewed title", **VERIFIED_CITATIONS, "rawFields": {"humanNote": "Confirmed manually", "_aiReview": {"evidence": "tampered"}}})
         self.assertEqual(response.status_code, 200)
         published = response.json()
         self.assertEqual(published["title"], "Human-reviewed title")
@@ -117,6 +122,75 @@ class CandidateFeedback(unittest.TestCase):
         self.assertEqual(published["rawFields"]["humanNote"], "Confirmed manually")
         self.assertEqual(published["rawFields"]["_aiReview"]["evidence"], evidence)
         self.assertEqual(published["rawFields"]["_aiReview"]["verificationStatus"], "needs_review")
+
+    def test_two_pages_syndicating_the_same_report_do_not_count_as_two_origins(self):
+        a, b = "https://authority.example/report", "https://press.example/copy"
+        with self.factory.begin() as session:
+            candidate = session.get(Candidate, self.candidate_id)
+            candidate.origin = "ai"
+            candidate.source_url = a
+            candidate.proposed_fields = {"referenceUrls": [a, b]}
+            candidate.evidence = {"sources": [{"url": url, "openedByVerifier": True,
+                "supports": ["Operator acknowledges incident"], "independenceGroup": "operator notice"} for url in (a, b)]}
+        # Reformatting the copy's URL does not remove the known provenance.
+        approved = self.approve({"title": "Reviewed title", "referenceUrls": ["http://www.press.example/copy?utm_campaign=tracking"],
+            "independentSourcesConfirmed": True})
+        self.assertEqual(approved.status_code, 422)
+        self.assertIn("two independent sources", approved.json()["detail"])
+        corrected = self.approve({"title": "Reviewed title", "referenceUrls": ["https://independent.example/report"],
+            "independentSourcesConfirmed": True})
+        self.assertEqual(corrected.status_code, 200)
+
+    def test_update_needs_its_own_corroboration_and_extends_one_existing_incident(self):
+        original = "https://background.example/original"
+        a, b = "https://authority.example/update", "https://press.example/update"
+        with self.factory.begin() as session:
+            incident, _ = upsert_incident(session, {"title": "Original incident", "summary": "Original description", "sourceUrl": original,
+                "latitude": 52, "longitude": 4, "rawFields": {"workbook": "indispensable"}}, notify=True)
+            incident_id = incident.id
+            candidate = session.get(Candidate, self.candidate_id)
+            candidate.origin = "ai"
+            candidate.source_url = a
+            candidate.proposed_fields = {"referenceUrls": [original, a, b]}
+            candidate.evidence = {"suggestedIncidentId": incident_id, "materialUpdate": {"reportedAt": "2025-07-02",
+                "summary": "Port confirms operations resumed.", "supportingUrls": [a, b]},
+                "sources": [{"url": url, "openedByVerifier": True, "supports": ["Confirmed fact"],
+                             "independenceGroup": url} for url in (original, a, b)]}
+
+        update = {"title": "Follow-up title", "summary": "Confirmed terminal restored", "independentSourcesConfirmed": True}
+        missing_target = self.approve({**update, "referenceUrls": [a, b]})
+        self.assertEqual(missing_target.status_code, 422)
+        for references in ([original, a], [a, a + "?utm_medium=email"]):
+            single = self.approve({**update, "updateIncidentId": incident_id, "referenceUrls": references})
+            self.assertEqual(single.status_code, 422)
+            self.assertIn("two independent sources", single.json()["detail"])
+
+        request = {**update, "updateIncidentId": incident_id, "referenceUrls": [a, b]}
+        first = self.approve(request)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(self.approve(request).status_code, 200)
+        published = self.client.get(f"/api/incidents/{incident_id}").json()
+        self.assertEqual(published["id"], first.json()["id"])
+        self.assertEqual(published["title"], "Original incident")
+        self.assertEqual(published["summary"], "Original description")
+        self.assertEqual((published["latitude"], published["longitude"]), (52, 4))
+        self.assertEqual(published["rawFields"]["workbook"], "indispensable")
+        self.assertEqual({source["url"] for source in published["sources"]}, {original, a, b})
+        self.assertEqual(len(published["updates"]), 1)
+        self.assertEqual(published["updates"][0]["summary"], "Confirmed terminal restored")
+        self.assertEqual(published["updates"][0]["reportedAt"], "2025-07-02")
+        self.assertEqual(self.count(Incident), 1)
+        self.assertEqual(self.count(OutboxEvent), 1)
+
+    def test_manual_publication_and_draft_transition_cannot_bypass_the_source_requirement(self):
+        payload = {"title": "One cited incident", "sourceUrl": "https://one.example/one",
+                   "referenceUrls": ["https://mirror.one.example/two"], "independentSourcesConfirmed": True}
+        self.assertEqual(self.client.post("/api/incidents", json=payload, headers=self.headers).status_code, 422)
+        draft = self.client.post("/api/incidents", json={**payload, "status": "pending"}, headers=self.headers)
+        self.assertEqual(draft.status_code, 201)
+        self.assertEqual(self.client.patch(f"/api/incidents/{draft.json()['id']}", json={"status": "published",
+            "independentSourcesConfirmed": True}, headers=self.headers).status_code, 422)
+        self.assertEqual(self.count(OutboxEvent), 0)
 
     def test_catalogs_follow_latest_workbook_without_inventing_values(self):
         empty = self.client.get("/api/admin/catalogs", headers=self.headers).json()

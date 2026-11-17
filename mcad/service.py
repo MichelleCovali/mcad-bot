@@ -190,7 +190,12 @@ def create_publication_event(session, incident, reviewed_candidate_id=None):
     return event
 
 
-def upsert_incident(session, payload, external_id=None, notify=False, import_batch_id=None, source_row=None, reviewed_candidate_id=None):
+class IncidentAlreadyExists(ValueError):
+    """A purported new incident shares the identity of an existing record."""
+
+
+def upsert_incident(session, payload, external_id=None, notify=False, import_batch_id=None, source_row=None,
+                    reviewed_candidate_id=None, *, require_new=False):
     """Return (incident, created), without committing. Historical imports use notify=False.
 
     External IDs identify separate source records even when they share an article URL.
@@ -214,6 +219,8 @@ def upsert_incident(session, payload, external_id=None, notify=False, import_bat
     else:
         incident = None
     created = incident is None
+    if require_new and not created:
+        raise IncidentAlreadyExists("A record already uses this source or identifier. Select it as the incident to update.")
     values = normalize_payload(incoming, existing=incident)
     if created:
         incident = Incident(title=values["title"], notification_suppressed=not notify)
@@ -255,8 +262,28 @@ def incident_dict(incident, details=False):
     data = {camel_case(column.name): getattr(incident, column.name) for column in Incident.__table__.columns if column.name not in excluded}
     for key in ["dateStart", "createdAt", "updatedAt"]:
         data[key] = iso(data[key])
+    raw = incident.raw_fields or {}
+    relations = raw.get("_country_relations")
+    country_facets = {}
+    if isinstance(relations, dict):
+        for field in ("incident_country", "victim_country", "attacker_country"):
+            entries = relations.get(field)
+            if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+                continue
+            labels = list(dict.fromkeys(entry["name"] for entry in entries if isinstance(entry.get("name"), str)))
+            current = getattr(incident, field) or ""
+            parts = [part.strip() for part in current.split(",") if part.strip()]
+            # Edited records use their current values, not an outdated workbook snapshot.
+            if labels and (current == ", ".join(labels) or parts == [entry.get("source") for entry in entries]):
+                country_facets[camel_case(field)] = labels
+    if country_facets:
+        data["countryFacets"] = country_facets
     if details:
         data["rawFields"] = incident.raw_fields
+        updates = raw.get("_incidentUpdates")
+        if isinstance(updates, list):
+            fields = ("candidateId", "publishedAt", "reportedAt", "summary", "sourceUrls")
+            data["updates"] = [{key: entry.get(key) for key in fields} for entry in updates if isinstance(entry, dict)]
         data["sources"] = [{"url": x.url, "shortName": x.short_name, "rawText": x.raw_text} for x in incident.sources]
         data["organisations"] = [{"name": x.name, "country": x.country, "role": x.role} for x in incident.organisations]
         data["actors"] = [{"name": x.name, "country": x.country} for x in incident.actors]
@@ -266,6 +293,8 @@ def incident_dict(incident, details=False):
 
 
 def candidate_dict(candidate):
+    from .editorial import candidate_review_metadata
+
     return {
         "id": candidate.id,
         "title": candidate.title,
@@ -283,5 +312,6 @@ def candidate_dict(candidate):
         "evidence": getattr(candidate, "evidence", None) or {},
         "verificationStatus": getattr(candidate, "verification_status", "unreviewed"),
         "aiRunId": getattr(candidate, "ai_run_id", None),
+        **candidate_review_metadata(candidate),
     }
 

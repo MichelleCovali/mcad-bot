@@ -4,6 +4,8 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 ENV VITE_API_BASE_URL=/api
+ARG VITE_ADMIN_HOST
+ARG VITE_PUBLIC_ORIGIN
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS application

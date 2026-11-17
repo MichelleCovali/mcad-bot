@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createIncidentClient,
   createAdminClient,
+  createWorkspaceClient,
   hasCoordinates,
   safeReferenceUrl,
   filterIncidents,
@@ -10,11 +11,30 @@ import {
 } from "../src/data/incidents.js";
 import { createIncidentIndex } from "../src/data/clusters.js";
 import { searchPlaces } from "../src/data/places.js";
+import { createIncidentSearchIndex, incidentFacetOptions, searchIncidentIndex, sortIncidentResults } from "../src/data/incidentSearch.js";
 import { candidateDraft, reviewedIncidentPayload, submitReviewedIncident, requestedReviewCandidate } from "../src/data/review.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 // Test-only inputs. These are never bundled as default map records.
+test("workspace authentication uses same-origin cookies and never forwards an access token", async () => {
+  const requests = [];
+  let expired = 0;
+  const client = createWorkspaceClient({ onSessionExpired: () => expired++, fetchImpl: async (url, options) => {
+    requests.push({ url, ...options });
+    return url.endsWith("/team") ? { ok: false, status: 401, json: async () => ({ detail: "Session expired." }) }
+      : { ok: true, json: async () => ({ user: null }) };
+  } });
+  await client.session();
+  await client.acceptInvite({ token: "test-link-token", password: "test-password" });
+  await assert.rejects(client.team(), /Session expired/);
+  assert.equal(expired, 1);
+  assert.deepEqual(requests.map(({ url }) => url), ["/api/auth/session", "/api/auth/accept-invite", "/api/admin/team"]);
+  assert.ok(requests.every((entry) => entry.credentials === "same-origin" && entry.headers.Authorization === undefined));
+  assert.equal(requests[0].headers["X-MCAD-Request"], undefined);
+  assert.equal(requests[1].headers["X-MCAD-Request"], "1");
+});
+
 test("Telegram checks are explicit authenticated requests and never start AI", async () => {
   const calls = [];
   const client = createAdminClient("test-token", { baseUrl: "/api", fetchImpl: async (url, options) => {
@@ -58,6 +78,41 @@ const record = (changes = {}) => ({
   incidentCountry: "Belgium",
   attackerCountry: "Unknown",
   ...changes,
+});
+
+test("incident explorer combines words, workbook country aliases, methods, and year", () => {
+  const records = validateIncidents([
+    record({
+      id: "matching", title: "Café Port disruption", method: "DDoS, Ransomware",
+      incidentCountry: "US", victimCountry: "Belgium, Netherlands",
+      countryFacets: { incidentCountry: ["United States"], victimCountry: ["Belgium", "Netherlands"] },
+    }),
+    record({ id: "old", title: "Café Port disruption", method: "Ransomware", incidentCountry: "United States", year: 2022 }),
+    record({ id: "other-type", title: "Café Port disruption", method: "Phishing", incidentCountry: "United States" }),
+    record({ id: "similar-method", title: "Café Port disruption", method: "Ransomware simulation", incidentCountry: "United States" }),
+    record({ id: "multi-year", title: "Investigation", method: "Spear-phishing", year: 2022, yearEnd: 2025 }),
+  ]);
+  const index = createIncidentSearchIndex(records);
+  const facets = incidentFacetOptions(index);
+  assert.equal(facets.country.filter(({ label }) => label === "United States").length, 1);
+  assert.ok(facets.method.some(({ label }) => label === "DDoS"));
+  assert.ok(!facets.country.some(({ label }) => label === "Unknown"));
+
+  const filters = { method: "ransomware", country: "united states", year: "2024" };
+  assert.deepEqual(searchIncidentIndex(index, "CAFE netherlands", filters, "incidentCountry").map(({ id }) => id), ["matching"]);
+  assert.deepEqual(searchIncidentIndex(index, "CAFE netherlands", filters, "victimCountry"), []);
+  assert.deepEqual(searchIncidentIndex(index, "cafe", { country: "netherlands", method: "ddos" }, "victimCountry").map(({ id }) => id), ["matching"]);
+  assert.deepEqual(searchIncidentIndex(index, "spear phishing", { year: "2024" }).map(({ id }) => id), ["multi-year"]);
+});
+
+test("list date sorting uses reported month and places unknown years last", () => {
+  const records = validateIncidents([
+    record({ id: "unknown", year: null }),
+    record({ id: "nov", month: "11" }),
+    record({ id: "april", month: "4" }),
+  ]);
+  assert.deepEqual(sortIncidentResults(records, "newest").map(({ id }) => id), ["nov", "april", "unknown"]);
+  assert.deepEqual(sortIncidentResults(records, "oldest").map(({ id }) => id), ["april", "nov", "unknown"]);
 });
 
 test("an unconfigured client returns no records and makes no request", async () => {

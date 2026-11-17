@@ -1,5 +1,4 @@
-"""Same-origin MCAD API and frontend hosting. Writes always require a server token."""
-import hmac
+"""Same-origin MCAD API and frontend hosting."""
 from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,18 +6,22 @@ from zipfile import BadZipFile, LargeZipFile
 from xml.etree.ElementTree import ParseError
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from openpyxl.utils.exceptions import InvalidFileException
 from fastapi.middleware.gzip import GZipMiddleware
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from .auth_api import auth_router
 from .config import Settings
 from .db import get_session_factory, make_engine
+from .editorial import approve_candidate, create_manual_incident, edit_manual_incident, reject_candidate
 from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
-from .service import candidate_dict, incident_dict, iso, update_incident, upsert_incident
+from .service import candidate_dict, incident_dict, iso
 from .security import ProtectedRequestsMiddleware
 
 
@@ -46,7 +49,7 @@ def create_app(settings=None, engine=None):
 
     app = FastAPI(title="MCAD API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1000)
-    app.add_middleware(ProtectedRequestsMiddleware, admin_token=settings.admin_api_token)
+    app.add_middleware(ProtectedRequestsMiddleware, settings=settings, factory=factory)
     app.state.settings, app.state.engine, app.state.session_factory = settings, engine, factory
     if settings.cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_methods=["GET", "POST", "PATCH"], allow_headers=["Authorization", "Content-Type"])
@@ -56,11 +59,24 @@ def create_app(settings=None, engine=None):
             yield session
 
     def require_admin(request: Request):
-        if not settings.admin_api_token:
-            raise HTTPException(503, "Administration is not configured on this server.")
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(token.encode("utf-8"), settings.admin_api_token.encode("utf-8")):
-            raise HTTPException(401, "A valid administrator bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+        principal = require_reviewer(request)
+        if principal["role"] != "admin":
+            raise HTTPException(403, "Administrator access is required for this action.")
+        return principal
+
+    def require_reviewer(request: Request):
+        principal = getattr(request.state, "principal", None)
+        if principal is None:
+            raise HTTPException(401, "Sign in to open the administration workspace.")
+        return principal
+
+    app.include_router(auth_router(factory, settings, require_admin))
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        if request.url.path.startswith("/api/auth/"):
+            return JSONResponse(status_code=422, content={"detail": "Send a valid JSON object."})
+        return await request_validation_exception_handler(request, error)
 
     @app.exception_handler(ValueError)
     async def invalid_value(_request, error):
@@ -116,7 +132,7 @@ def create_app(settings=None, engine=None):
     @app.post("/api/incidents", dependencies=[Depends(require_admin)])
     def create_incident(payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():
-            incident, created = upsert_incident(session, payload, notify=True)
+            incident, created = create_manual_incident(session, payload)
             result = incident_dict(incident, details=True)
         return JSONResponse(result, status_code=201 if created else 200)
 
@@ -126,11 +142,11 @@ def create_app(settings=None, engine=None):
             incident = session.scalar(select(Incident).where(Incident.id == incident_id).with_for_update())
             if incident is None:
                 raise HTTPException(404, "Incident not found.")
-            update_incident(session, incident, payload)
+            edit_manual_incident(session, incident, payload)
             result = incident_dict(incident, details=True)
         return result
 
-    @app.get("/api/admin/candidates", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/candidates", dependencies=[Depends(require_reviewer)])
     def list_candidates(status: str = "pending", session=Depends(session_dependency)):
         if status not in {"pending", "approved", "rejected", "all"}:
             raise HTTPException(422, "status must be pending, approved, rejected or all")
@@ -140,7 +156,7 @@ def create_app(settings=None, engine=None):
         candidates = list(session.scalars(query))
         return {"items": [candidate_dict(candidate) for candidate in candidates], "meta": {"total": len(candidates)}}
 
-    @app.get("/api/admin/catalogs", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/catalogs", dependencies=[Depends(require_reviewer)])
     def workbook_catalogs(session=Depends(session_dependency)):
         from .import_workbook import SOURCE_FIELDS
         from .service import camel_case
@@ -153,127 +169,37 @@ def create_app(settings=None, engine=None):
             "importBatchId": batch.id if batch else None,
         }
 
-    @app.get("/api/admin/candidates/{candidate_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/candidates/{candidate_id}", dependencies=[Depends(require_reviewer)])
     def get_candidate(candidate_id: str, session=Depends(session_dependency)):
         candidate = session.get(Candidate, candidate_id)
         if candidate is None:
             raise HTTPException(404, "Candidate not found.")
         return candidate_dict(candidate)
 
-    @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
-    def approve_candidate(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
+    @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_reviewer)])
+    def approve_report(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():
-            candidate = session.scalar(select(Candidate).where(Candidate.id == candidate_id).with_for_update())
-            if candidate is None:
-                raise HTTPException(404, "Candidate not found.")
-            if candidate.status == "approved" and candidate.incident_id:
-                return incident_dict(session.get(Incident, candidate.incident_id), details=True)
-            if candidate.status != "pending":
-                raise HTTPException(409, "Only pending candidates can be approved.")
-            if not isinstance(payload.get("title"), str) or not payload["title"].strip():
-                raise ValueError("A human-verified title is required for approval")
-            # The row lock is used by PostgreSQL. The conditional transition also
-            # protects against stale requests where SELECT FOR UPDATE is absent.
-            changed = session.execute(update(Candidate).where(
-                Candidate.id == candidate_id, Candidate.status == "pending"
-            ).values(status="approved").execution_options(synchronize_session=False))
-            if changed.rowcount != 1:
-                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
-            approved = dict(payload)
-            approved["status"] = "published"
-            approved.setdefault("sourceUrl", candidate.source_url)
-            approved.setdefault("description", candidate.summary)
-            if getattr(candidate, "origin", "rss") == "ai":
-                raw_fields = approved.get("rawFields", approved.get("raw_fields", {}))
-                if not isinstance(raw_fields, dict):
-                    raise ValueError("raw_fields must be an object")
-                approved.pop("raw_fields", None)
-                approved["rawFields"] = {**raw_fields, "_aiReview": {
-                    "candidateId": candidate.id,
-                    "runId": getattr(candidate, "ai_run_id", None),
-                    "verificationStatus": getattr(candidate, "verification_status", "unreviewed"),
-                    "evidence": getattr(candidate, "evidence", None) or {},
-                    "proposedFields": getattr(candidate, "proposed_fields", None) or {},
-                }}
-            incident, _ = upsert_incident(session, approved, notify=True, reviewed_candidate_id=candidate.id)
-            candidate.status, candidate.incident_id = "approved", incident.id
-            result = incident_dict(incident, details=True)
-        return result
+            incident = approve_candidate(session, candidate_id, payload)
+            return incident_dict(incident, details=True)
 
-    @app.post(
-        "/api/admin/candidates/{candidate_id}/reject",
-        dependencies=[Depends(require_admin)]
-    )
-    def reject_candidate(
-        candidate_id: str,
-        payload: dict = Body(...),
-        session=Depends(session_dependency)
-    ):
-        allowed_reasons = {
-            "not_maritime",
-            "not_cyber",
-            "duplicate",
-            "insufficient_evidence",
-            "incorrect_information",
-            "other",
-        }
-
-        reason = payload.get("reason")
-        notes = payload.get("notes", "")
-
-        if not isinstance(reason, str) or reason not in allowed_reasons:
-            raise HTTPException(
-                422,
-                "A valid rejection reason is required."
-            )
-
-        if not isinstance(notes, str) or len(notes) > 2000:
-            raise HTTPException(
-                422,
-                "Notes must be text of at most 2000 characters."
-            )
-
+    @app.post("/api/admin/candidates/{candidate_id}/reject", dependencies=[Depends(require_reviewer)])
+    def reject_report(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():
-            candidate = session.scalar(
-                select(Candidate)
-                .where(Candidate.id == candidate_id)
-                .with_for_update()
-            )
-
-            if candidate is None:
-                raise HTTPException(
-                    404, "Candidate not found."
-                )
-
-            if candidate.status != "pending":
-                raise HTTPException(
-                    409,
-                    "Only pending candidates can be rejected."
-                )
-
-            changed = session.execute(update(Candidate).where(
-                Candidate.id == candidate_id, Candidate.status == "pending"
-            ).values(status="rejected", rejection_reason=reason, rejection_notes=notes.strip())
-                .execution_options(synchronize_session=False))
-            if changed.rowcount != 1:
-                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
-            candidate.status = "rejected"
-            candidate.rejection_reason = reason
-            candidate.rejection_notes = notes.strip()
-
-        return {
-            "message": "Candidate rejected successfully",
-            "candidate_id": candidate_id,
-            "status": "rejected",
-            "reason": reason,
-            "notes": notes.strip()
-        }
+            candidate = reject_candidate(session, candidate_id, payload.get("reason"), payload.get("notes"))
+            return {
+                "message": "Candidate rejected successfully",
+                "candidate_id": candidate.id,
+                "status": candidate.status,
+                "reason": candidate.rejection_reason,
+                "notes": candidate.rejection_notes,
+            }
 
     @app.get("/api/admin/telegram", dependencies=[Depends(require_admin)])
     def telegram_status(session=Depends(session_dependency)):
         from .models import CandidateDelivery
         return {"configured": bool(settings.telegram_bot_token),
                 "testChatConfigured": bool(settings.telegram_chat_id),
+                "reviewConfigured": bool(settings.enable_workers and settings.telegram_review_enabled),
                 "activeSubscribers": session.scalar(select(func.count()).select_from(Subscriber).where(Subscriber.active.is_(True))),
                 "pendingDeliveries": session.scalar(select(func.count()).select_from(Delivery).where(Delivery.status.in_(["pending", "retry", "sending"])))
                     + session.scalar(select(func.count()).select_from(CandidateDelivery).where(CandidateDelivery.status.in_(["pending", "retry", "sending"])))}
@@ -347,6 +273,9 @@ def create_app(settings=None, engine=None):
         fields = ["source_rows", "accepted_rows", "quarantined_rows", "mapped_rows", "unmapped_rows", "created_records", "existing_records", "reused_batch", "notification_events_created"]
         from .service import camel_case
         return {camel_case(field): summary.get(field) for field in fields}
+
+    from .prompt_learning import learning_router
+    app.include_router(learning_router(factory, settings, require_admin))
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):

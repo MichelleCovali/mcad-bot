@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,9 +14,11 @@ def env_bool(name, default=False):
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "sqlite:///./data/mcad.sqlite3"
-    admin_api_token: str = ""
+    admin_api_token: str = field(default="", repr=False)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_review_chat_id: str = ""
+    telegram_reviewer_ids: tuple[str, ...] = ()
     public_base_url: str = ""
     enable_workers: bool = True
     enable_feed_polling: bool = True
@@ -28,22 +31,42 @@ class Settings:
     static_dir: Path = ROOT / "frontend" / "dist" / "client"
     cors_origins: tuple = ()
     telegram_message_format: str = "link"
+    admin_secure_cookie: bool | None = None
+    admin_trust_railway_proxy: bool = False
+    enable_ai_feedback: bool = False
 
     def __post_init__(self):
         if self.telegram_message_format not in {"link", "rich"}:
             raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
+        if self.telegram_review_chat_id and not re.fullmatch(r"-?[1-9]\d{0,19}", self.telegram_review_chat_id):
+            raise ValueError("TELEGRAM_REVIEW_CHAT_ID must be a numeric Telegram chat ID.")
+        if any(not re.fullmatch(r"[1-9]\d{0,19}", user_id) for user_id in self.telegram_reviewer_ids):
+            raise ValueError("TELEGRAM_REVIEWER_IDS must contain numeric Telegram user IDs.")
+
+    @property
+    def telegram_review_enabled(self):
+        return bool(self.telegram_bot_token and self.enable_telegram_polling
+                    and self.telegram_review_chat_id and self.telegram_reviewer_ids)
 
     @classmethod
     def from_env(cls):
         from dotenv import load_dotenv
         load_dotenv(ROOT / ".env")
-        if os.getenv("RAILWAY_ENVIRONMENT_ID") and not os.getenv("DATABASE_URL"):
+        railway_hosted = bool(os.getenv("RAILWAY_ENVIRONMENT_ID"))
+        if railway_hosted and not os.getenv("DATABASE_URL"):
             raise RuntimeError("DATABASE_URL is required in the hosted environment.")
+        configured_cookie = os.getenv("ADMIN_SECURE_COOKIE")
+        require_secure_cookie = True if railway_hosted else (
+            env_bool("ADMIN_SECURE_COOKIE") if configured_cookie is not None else None
+        )
         return cls(
             database_url=os.getenv("DATABASE_URL", "sqlite:///./data/mcad.sqlite3"),
             admin_api_token=os.getenv("ADMIN_API_TOKEN", "").strip(),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_review_chat_id=os.getenv("TELEGRAM_REVIEW_CHAT_ID", "").strip(),
+            telegram_reviewer_ids=tuple(dict.fromkeys(
+                entry.strip() for entry in os.getenv("TELEGRAM_REVIEWER_IDS", "").split(",") if entry.strip())),
             telegram_message_format=os.getenv("TELEGRAM_MESSAGE_FORMAT", "link").strip().lower(),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
             enable_workers=env_bool("ENABLE_BACKGROUND_WORKERS", True),
@@ -54,4 +77,7 @@ class Settings:
             ai_discovery_model=os.getenv("AI_DISCOVERY_MODEL", "gpt-6-luna").strip(),
             ai_verification_model=os.getenv("AI_VERIFICATION_MODEL", "gpt-6.1-sol").strip(),
             cors_origins=tuple(x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()),
+            admin_secure_cookie=require_secure_cookie,
+            admin_trust_railway_proxy=railway_hosted,
+            enable_ai_feedback=env_bool("ENABLE_AI_FEEDBACK", False),
         )

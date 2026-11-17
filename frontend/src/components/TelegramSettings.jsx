@@ -25,8 +25,9 @@ export function TelegramSettings({ client }) {
   }
   return <details className="ai-monitor-settings">
     <summary>Telegram notifications</summary>
-    <p>New source-checked AI reports are sent once for review. Uncertain reports stay in the website queue. Publishing a report does not repeat an alert already received.</p>
+    <p>The review chat receives the proposed incident description and sources. An authorized editor can accept the report or reject it with an explanation.</p>
     {status && <p>{status.configured ? "Bot connected." : "Bot is not configured."} {status.activeSubscribers} active subscribers · {status.pendingDeliveries} pending deliveries.</p>}
+    {status && <p>{status.reviewConfigured ? "Editorial review chat is configured." : "Set the editorial chat and reviewer IDs on the server to review reports in Telegram."}</p>}
     <p className="admin-help">Send one clearly labelled test to the configured test chat. This does not run AI or publish an incident.</p>
     {error && <p className="inline-error" role="alert">{error}</p>}
     {message && <p className="success-message" role="status">{message}</p>}

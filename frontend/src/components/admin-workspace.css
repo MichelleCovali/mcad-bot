@@ -1,0 +1,381 @@
+body:has(.workspace), body:has(.workspace-loading) {
+  margin: 0;
+  overflow: auto;
+}
+
+.workspace, .workspace-loading {
+  min-height: 100dvh;
+  color: var(--ink);
+  background: var(--paper);
+}
+.workspace-loading {
+  padding: clamp(22px, 3vw, 38px) clamp(20px, 3.5vw, 58px);
+}
+.workspace-main {
+  line-height: 1.5;
+}
+.workspace-main a {
+  color: var(--teal);
+  overflow-wrap: anywhere;
+}
+.workspace-main :is(button, a, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.workspace-nav {
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-bottom: 14px;
+}
+.workspace-nav button {
+  white-space: nowrap;
+}
+.workspace-nav button:hover {
+  background: var(--surface);
+}
+.workspace-profile {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  color: var(--muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.workspace-profile strong, .workspace-profile span {
+  font-size: 13px;
+}
+.workspace-profile strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.workspace-card, .workspace .ai-monitor-settings {
+  min-width: 0;
+  margin: 0;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  box-shadow: 0 4px 14px #233b4909;
+}
+.workspace-card h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.workspace-muted, .workspace .admin-help {
+  color: var(--muted);
+}
+.workspace-stack, .workspace .admin-review {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.workspace-overview {
+  padding: 0;
+}
+.workspace-section-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.workspace-section-heading h2 {
+  font-size: 16px;
+}
+.workspace-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(152px, 100%), 1fr));
+  gap: 10px;
+}
+.workspace-stats:has(> :nth-child(4)) {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.workspace-metrics {
+  gap: 0;
+  margin: 0;
+}
+.workspace-metrics:not(:has(> :nth-child(4))) {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.workspace-metrics .workspace-stat {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px;
+}
+.workspace-metrics .workspace-stat dd {
+  margin-top: auto;
+  padding-top: 4px;
+}
+.workspace-metrics .workspace-stat + .workspace-stat {
+  border-left: 1px solid var(--line);
+}
+.workspace-stat p, .workspace-stat dt, .workspace-stat small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.workspace-stat strong, .workspace-stat dd {
+  display: block;
+  margin: 4px 0 0;
+  font-size: clamp(19px, 2.6vw, 28px);
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.workspace-auth {
+  display: grid;
+  justify-items: center;
+}
+.workspace-signin {
+  width: min(100%, 438px);
+  margin-block: clamp(14px, 6vh, 60px);
+  padding: clamp(18px, 3vw, 28px);
+}
+.workspace-signin .explorer-intro h1 {
+  font-size: clamp(24px, 3.3vw, 32px);
+}
+.workspace-signin form button {
+  justify-self: start;
+}
+.workspace-signin-foot {
+  margin: 18px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.workspace-inline-form, .workspace-invite {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.workspace-inline-form > label, .workspace-invite > label {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.workspace-inline-form > label:nth-child(2) {
+  flex: 0 1 180px;
+}
+.workspace-main label {
+  display: grid;
+  gap: 5px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.workspace-main :is(input, select, textarea) {
+  min-width: 0;
+  width: 100%;
+  min-height: 43px;
+  padding: 8px 11px;
+  color: var(--ink);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.workspace-main textarea {
+  resize: vertical;
+}
+.workspace-main .review-fields:disabled :is(input, select, textarea) {
+  color: var(--muted);
+  background: var(--paper);
+}
+.workspace-main .monitor-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.workspace-main .review-confirmation {
+  display: flex;
+  align-items: start;
+  gap: 9px;
+  margin: 12px 0;
+}
+.workspace-main .review-confirmation input {
+  flex: 0 0 16px;
+  margin: 1px 0 0;
+}
+.workspace-main input[type="checkbox"] {
+  width: 16px;
+  min-height: 16px;
+  accent-color: var(--teal);
+}
+
+.workspace-main :is(.primary-action, .secondary-action),
+.workspace-main .candidate-queue li button {
+  min-height: 40px;
+  margin: 0;
+  padding: 7px 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.workspace-main .primary-action {
+  color: #fff;
+  background: var(--teal);
+  border-color: var(--teal);
+}
+.workspace-main .primary-action:hover:not(:disabled) {
+  background: #124e4c;
+}
+.workspace-main :is(.secondary-action, .candidate-queue li button):hover:not(:disabled) {
+  color: var(--teal);
+  background: var(--pale);
+  border-color: #80aaa7;
+}
+.workspace button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+.workspace .inline-error, .workspace .success-message {
+  border-radius: 8px;
+}
+.workspace .success-message, .workspace .monitor-state {
+  color: var(--teal);
+  background: var(--pale);
+  border-radius: 8px;
+}
+
+.workspace-rows {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.workspace-rows > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.workspace-rows > li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.workspace-rows small {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+.workspace-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.workspace-main .workspace-row-actions select {
+  width: auto;
+}
+.workspace .admin-review > button {
+  justify-self: start;
+}
+.workspace .candidate-queue li, .workspace-version {
+  border-color: var(--line);
+}
+.workspace .candidate-queue li strong, .workspace .detail-field dd {
+  color: var(--ink);
+}
+.workspace .detail-field dt {
+  color: var(--muted);
+}
+.workspace .review-feedback, .workspace .candidate-evidence,
+.workspace-prompt {
+  color: var(--ink);
+  background: var(--field-bg);
+  border-radius: 8px;
+}
+.workspace .candidate-evidence blockquote {
+  color: var(--muted);
+  border-color: var(--field-border);
+}
+.workspace .workspace-disclosure {
+  margin-bottom: 12px;
+}
+.workspace summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.workspace .incident-form > .secondary-action {
+  margin-bottom: 12px;
+}
+.workspace .workspace-feedback > li {
+  display: grid;
+  align-items: start;
+  justify-content: stretch;
+  gap: 7px;
+}
+.workspace-feedback p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+.workspace-prompt {
+  max-height: 16rem;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.workspace-version {
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.workspace-version:last-child {
+  padding-bottom: 0;
+}
+
+@media (max-width: 700px) {
+  .workspace-stats:has(> :nth-child(4)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .workspace-metrics:has(> :nth-child(4)) .workspace-stat:nth-child(3) {
+    border-left: 0;
+  }
+  .workspace-metrics:has(> :nth-child(4)) .workspace-stat:nth-child(n+3) {
+    border-top: 1px solid var(--line);
+  }
+}
+@media (max-width: 590px) {
+  .workspace-title {
+    flex-wrap: wrap;
+  }
+  .workspace-profile {
+    width: 100%;
+    text-align: left;
+  }
+  .workspace-card, .workspace .ai-monitor-settings, .workspace-section-heading,
+  .workspace-metrics .workspace-stat {
+    padding: 12px 14px;
+  }
+  .workspace-overview {
+    padding: 0;
+  }
+  .workspace-signin {
+    padding: 18px;
+  }
+  .workspace-rows > li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
