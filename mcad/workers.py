@@ -5,6 +5,7 @@ holds a renewable lease, including across overlapping hosted deployments.
 """
 import logging
 import re
+import time
 import threading
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,7 +26,8 @@ from .telegram_review import (CallbackReply, REJECTION_REASONS, is_authorized_re
                               valid_approval_confirmation, approval_confirmation_keyboard,
                               verified_evidence_sources, telegram_approval_payload, approval_review_message,
                               approval_session_key,
-                              rejection_confirmation_keyboard, rejection_reason_keyboard)
+                              rejection_confirmation_keyboard, rejection_reason_keyboard,
+                              rejection_note_session_key, normalize_rejection_note)
 
 
 logger = logging.getLogger("mcad.workers")
@@ -85,6 +87,13 @@ def notification_text(payload, base_url=""):
     elif payload.get("sourceUrl"):
         lines.extend(["", safe_url(payload["sourceUrl"]) or ""])
     return "\n".join(lines)[:4096]
+
+
+@dataclass(frozen=True)
+class MessageReply:
+    chat_id: str
+    text: str
+    reply_markup: dict | None = None
 
 
 @dataclass
@@ -207,7 +216,8 @@ HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI rep
 
 def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(),
                    review_buttons_enabled=False, rejection_actions_enabled=False,
-                   approval_actions_enabled=False, approval_secret=""):
+                   approval_actions_enabled=False, approval_secret="",
+                   rejection_notes_enabled=False):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -324,7 +334,15 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 if not rejection_actions_enabled:
                     return CallbackReply(callback_id, "Telegram rejection is disabled. Use the MCAD admin panel.")
                 stage, reason_key, candidate_id = rejection
-                chat_id = str(callback["from"]["id"])
+                reviewer_id = callback["from"]["id"]
+                chat_id = str(reviewer_id)
+                note_state = (session.get(WorkerState, rejection_note_session_key(reviewer_id))
+                              if rejection_notes_enabled else None)
+                expired_note = False
+                if note_state is not None and (note_state.value or {}).get("expiresAt", 0) < time.time():
+                    expired_note = True
+                    session.delete(note_state)
+                    note_state = None
                 # A reviewer must actually have received this specific candidate
                 # alert in their private subscription; knowing a UUID is not enough.
                 delivered = session.scalar(select(CandidateDelivery.id).join(
@@ -338,6 +356,8 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 if not delivered:
                     return CallbackReply(callback_id, "This report was not delivered to your private subscription.")
                 if stage == "cancel":
+                    if note_state is not None and note_state.value.get("candidateId") == candidate_id:
+                        session.delete(note_state)
                     return CallbackReply(callback_id, "Rejection cancelled. No changes saved.")
                 candidate = session.scalar(select(Candidate).where(
                     Candidate.id == candidate_id
@@ -348,20 +368,55 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                         or candidate.related_incident_id is not None):
                     return CallbackReply(callback_id, "This candidate cannot be rejected from Telegram. Review in the admin panel.")
                 if stage == "start":
+                    # Starting over discards any earlier unsaved explanation.
+                    if note_state is not None:
+                        session.delete(note_state)
                     return CallbackReply(callback_id, "Select a rejection reason.", chat_id,
                                          "Choose a rejection reason for: " + clean_text(candidate.title)[:240],
                                          rejection_reason_keyboard(candidate_id))
                 reason, label = REJECTION_REASONS[reason_key]
                 if stage == "reason":
+                    # A newly selected reason invalidates an older note draft.
+                    if note_state is not None:
+                        session.delete(note_state)
+                    description = ("This saves the structured reason. Optionally add an explanation first."
+                                   if rejection_notes_enabled else
+                                   "This will save the reason. To add detailed notes, use the web admin panel.")
                     return CallbackReply(callback_id, "Confirm or cancel your decision.", chat_id,
-                                         f"Reject '{clean_text(candidate.title)[:160]}' as {label}? "
-                                         "This will save the reason. To add detailed notes, use the web admin panel.",
-                                         rejection_confirmation_keyboard(candidate_id, reason_key))
+                                         f"Reject '{clean_text(candidate.title)[:160]}' as {label}? " + description,
+                                         rejection_confirmation_keyboard(candidate_id, reason_key,
+                                                                         allow_note=rejection_notes_enabled))
+                if stage == "note":
+                    if not rejection_notes_enabled:
+                        return CallbackReply(callback_id, "Telegram rejection explanations are disabled.")
+                    data = {"candidateId": candidate_id, "reasonKey": reason_key,
+                            "stage": "awaiting_text", "expiresAt": time.time() + 15 * 60}
+                    if note_state is None:
+                        session.add(WorkerState(name=rejection_note_session_key(reviewer_id), value=data))
+                    else:
+                        note_state.value = data
+                    return CallbackReply(callback_id, "Reply to the bot's prompt with your explanation.", chat_id,
+                                         "MCAD rejection explanation — reply to THIS message with your reason "
+                                         "(maximum 1000 characters). You will confirm before it is saved. "
+                                         "Use /cancel to discard.",
+                                         {"force_reply": True, "input_field_placeholder": "Explain the rejection"})
+                note = ""
+                if stage == "final":
+                    if not rejection_notes_enabled or expired_note or note_state is None:
+                        return CallbackReply(callback_id, "Explanation expired or unavailable. Start review again.")
+                    data = note_state.value or {}
+                    if data.get("candidateId") != candidate_id or data.get("reasonKey") != reason_key:
+                        return CallbackReply(callback_id, "A different rejection is in progress. Start review again.")
+                    if data.get("stage") != "ready" or not isinstance(data.get("note"), str):
+                        return CallbackReply(callback_id, "Enter your explanation first, or use Cancel.")
+                    note = data["note"]
+                elif note_state is not None or expired_note:
+                    return CallbackReply(callback_id, "An explanation is in progress or expired. Use its latest confirmation, or Cancel.")
                 # The state change is conditional, as in the admin API, to avoid
                 # double reviews or overwriting an approval from another interface.
                 changed = session.execute(update(Candidate).where(
                     Candidate.id == candidate_id, Candidate.status == "pending"
-                ).values(status="rejected", rejection_reason=reason, rejection_notes="")
+                ).values(status="rejected", rejection_reason=reason, rejection_notes=note)
                     .execution_options(synchronize_session=False))
                 if changed.rowcount != 1:
                     return CallbackReply(callback_id, "This report was already reviewed. No changes saved.")
@@ -370,9 +425,12 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 evidence = dict(candidate.evidence or {})
                 history = list(evidence.get("telegramReviewHistory", []))
                 history.append({"decision": "rejected", "reason": reason,
-                                "reviewerId": chat_id, "reviewedAt": utcnow().isoformat() + "Z"})
+                                "reviewerId": chat_id, "reviewedAt": utcnow().isoformat() + "Z",
+                                "hasExplanation": bool(note)})
                 evidence["telegramReviewHistory"] = history
                 candidate.evidence = evidence
+                if note_state is not None:
+                    session.delete(note_state)
                 return CallbackReply(callback_id, "Rejected: " + label + ". Saved in the MCAD review queue.")
             action = parse_preview_action(callback.get("data"))
             if action is None:
@@ -389,6 +447,56 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
         text = message.get("text") or ""
         command = text.split()[0].lower().split("@")[0] if isinstance(text, str) and text.strip() else ""
         chat_id = str(chat["id"])
+        if rejection_notes_enabled and rejection_actions_enabled and review_buttons_enabled:
+            actor = message.get("from")
+            if (isinstance(actor, dict) and type(actor.get("id")) is int and
+                    actor["id"] == chat["id"] and actor["id"] in reviewer_ids and
+                    actor.get("is_bot") is not True):
+                state_key = rejection_note_session_key(actor["id"])
+                note_state = session.get(WorkerState, state_key)
+                if note_state is not None:
+                    draft = note_state.value or {}
+                    if command == "/cancel":
+                        session.delete(note_state)
+                        return chat_id, "Rejection explanation cancelled. No changes saved."
+                    if draft.get("expiresAt", 0) < time.time():
+                        session.delete(note_state)
+                        if not command.startswith("/"):
+                            return chat_id, "Your rejection explanation expired. Start review again."
+                    if not command.startswith("/") and draft.get("stage") == "awaiting_text":
+                        reply_to = message.get("reply_to_message")
+                        # Only a reply to our explicit ForceReply prompt counts.
+                        if (not isinstance(reply_to, dict) or
+                                not isinstance(reply_to.get("from"), dict) or
+                                reply_to["from"].get("is_bot") is not True or
+                                not str(reply_to.get("text", "")).startswith("MCAD rejection explanation")):
+                            return chat_id, "Reply directly to the MCAD rejection explanation prompt, or use /cancel."
+                        note = normalize_rejection_note(text)
+                        if note is None:
+                            return chat_id, "Enter between 1 and 1000 characters of explanation, or /cancel."
+                        cid = draft.get("candidateId")
+                        key = draft.get("reasonKey")
+                        delivered = session.scalar(select(CandidateDelivery.id).join(
+                            CandidateNotification, CandidateDelivery.event_id == CandidateNotification.id
+                        ).join(Subscriber, CandidateDelivery.chat_id == Subscriber.chat_id).where(
+                            CandidateNotification.candidate_id == cid,
+                            CandidateDelivery.chat_id == chat_id,
+                            CandidateDelivery.status == "sent",
+                            Subscriber.active.is_(True),
+                        ).limit(1))
+                        candidate = session.get(Candidate, cid)
+                        if (not delivered or candidate is None or candidate.status != "pending" or
+                                candidate.baseline or candidate.origin != "ai" or
+                                candidate.verification_status != "supported" or
+                                candidate.relationship_type not in {"unclassified", "new_incident"} or
+                                candidate.related_incident_id is not None or key not in REJECTION_REASONS):
+                            session.delete(note_state)
+                            return chat_id, "This candidate cannot be reviewed. No changes saved."
+                        note_state.value = {**draft, "stage": "ready", "note": note,
+                                            "expiresAt": time.time() + 15 * 60}
+                        return MessageReply(chat_id, "Explanation received. Confirm or cancel rejection of: " +
+                                            clean_text(candidate.title)[:200],
+                                            rejection_confirmation_keyboard(cid, key, with_note=True))
         if command == "/subscribe":
             set_subscription(session, chat_id, True)
             reply = "Subscribed. You will receive new source-checked AI reports and published MCAD incidents. AI reports require human review. Historical records are not sent."
@@ -516,11 +624,15 @@ class WorkerController:
                     rejection_actions_enabled=self.settings.enable_telegram_rejection_actions,
                     approval_actions_enabled=self.settings.enable_telegram_approval_actions,
                     approval_secret=self.settings.telegram_bot_token,
+                    rejection_notes_enabled=self.settings.enable_telegram_rejection_notes,
                 )
                 if isinstance(reply, CallbackReply):
                     self.client.answer_callback(reply.callback_id, reply.text)
                     if reply.chat_id and reply.message:
                         self.client.send(reply.chat_id, reply.message, reply_markup=reply.reply_markup)
+                elif isinstance(reply, MessageReply):
+                    self.client.send(reply.chat_id, reply.text, reply_markup=reply.reply_markup)
+                    self.stopped.wait(1.05)
                 elif reply:
                     self.client.send(*reply)
                     self.stopped.wait(1.05)

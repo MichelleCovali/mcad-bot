@@ -35,10 +35,11 @@ candidate IDs or a production database for testing.
    `candidate.evidence.telegramReviewHistory`. No public incident or
    publication notification is created.
 
-**Scope limits:** This stage supports **structured rejection reasons only**.
-Free-text explanations, Approve, and Correct classification are not implemented
-in Telegram yet. Use the web admin panel for those actions. The `other` rejection
-reason is intentionally excluded until a free-text note flow is available.
+**Step 5 extension:** Optional free-text explanations are now implemented behind
+`ENABLE_TELEGRAM_REJECTION_NOTES`. See `docs/telegram-rejection-notes.md`.
+Correct classification is not implemented in Telegram yet. The `other`
+rejection reason is still excluded, so every rejection must have a structured
+reason as well as any optional explanation.
 
 ## Run automated tests
 

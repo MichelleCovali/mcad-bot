@@ -13,6 +13,7 @@ administrator panel. No database migrations are needed.
 TELEGRAM_REVIEWER_IDS=123456789
 ENABLE_TELEGRAM_REVIEW_BUTTONS=false
 ENABLE_TELEGRAM_REJECTION_ACTIONS=false
+ENABLE_TELEGRAM_REJECTION_NOTES=false
 ENABLE_TELEGRAM_APPROVAL_ACTIONS=false
 ```
 
@@ -21,7 +22,7 @@ ENABLE_TELEGRAM_APPROVAL_ACTIONS=false
 - `ENABLE_TELEGRAM_APPROVAL_ACTIONS=true` only has an effect when review
   buttons are also enabled, a nonempty bot token exists, and an authorized,
   subscribed reviewer has been sent this specific AI candidate.
-- Keep **all three switches false on the client bot** until the team approves a
+- Keep **all four switches false on the client bot** until the team approves a
   staged deployment and completes the live tests using a separate bot/database.
 - Do not enable Telegram polling simultaneously in two deployments using the
   same bot token. Set `ENABLE_BACKGROUND_WORKERS=false` locally when using

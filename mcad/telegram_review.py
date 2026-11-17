@@ -103,11 +103,32 @@ def rejection_reason_keyboard(candidate_id: str) -> dict:
     return {"inline_keyboard": rows}
 
 
-def rejection_confirmation_keyboard(candidate_id: str, key: str) -> dict:
-    return {"inline_keyboard": [
-        [{"text": "Confirm rejection", "callback_data": f"mcad:r:confirm:{key}:{candidate_id}"}],
-        [{"text": "Cancel", "callback_data": f"mcad:r:cancel:{candidate_id}"}],
-    ]}
+def rejection_confirmation_keyboard(candidate_id: str, key: str, *, allow_note: bool = False,
+                                    with_note: bool = False) -> dict:
+    action = "final" if with_note else "confirm"
+    label = "Confirm with explanation" if with_note else ("Confirm without explanation" if allow_note else "Confirm rejection")
+    rows = [[{"text": label, "callback_data": f"mcad:r:{action}:{key}:{candidate_id}"}]]
+    if allow_note:
+        rows.append([{"text": "Add explanation", "callback_data": f"mcad:r:note:{key}:{candidate_id}"}])
+    rows.append([{"text": "Cancel", "callback_data": f"mcad:r:cancel:{candidate_id}"}])
+    return {"inline_keyboard": rows}
+
+
+def rejection_note_session_key(reviewer_id: int) -> str:
+    """One active, short-lived note draft per reviewer, stored in the database."""
+    if type(reviewer_id) is not int or reviewer_id <= 0:
+        raise ValueError("Reviewer ID must be a positive integer")
+    return f"tg_reject_note:{reviewer_id}"
+
+
+def normalize_rejection_note(value: object) -> str | None:
+    """Accept a useful single-message explanation without storing control characters."""
+    if not isinstance(value, str):
+        return None
+    note = " ".join(value.split())
+    if not note or len(note) > 1000 or any(ord(c) < 32 or ord(c) == 127 for c in note):
+        return None
+    return note
 
 
 def parse_rejection_action(data: object) -> tuple[str, str | None, str] | None:
@@ -117,7 +138,7 @@ def parse_rejection_action(data: object) -> tuple[str, str | None, str] | None:
     parts = data.split(":")
     if len(parts) == 4 and parts[:2] == ["mcad", "r"] and parts[2] in {"start", "cancel"}:
         stage, key, candidate_id = parts[2], None, parts[3]
-    elif len(parts) == 5 and parts[:2] == ["mcad", "r"] and parts[2] in {"reason", "confirm"} and parts[3] in REJECTION_REASONS:
+    elif len(parts) == 5 and parts[:2] == ["mcad", "r"] and parts[2] in {"reason", "confirm", "note", "final"} and parts[3] in REJECTION_REASONS:
         stage, key, candidate_id = parts[2], parts[3], parts[4]
     else:
         return None
