@@ -12,16 +12,19 @@ from uuid import uuid4
 from urllib.parse import quote
 
 import requests
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .models import (Candidate, CandidateDelivery, CandidateNotification, Delivery, Incident,
+from .models import (Candidate, CandidateDelivery, CandidateNotification, Delivery, Incident, IncidentSource,
                      OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow)
-from .service import safe_url
+from .service import safe_url, upsert_incident
 from .candidate_alerts import deliver_candidate_one
 from .telegram_review import (CallbackReply, REJECTION_REASONS, is_authorized_review_callback,
-                              parse_preview_action, parse_rejection_action,
+                              parse_preview_action, parse_rejection_action, parse_approval_action,
+                              valid_approval_confirmation, approval_confirmation_keyboard,
+                              verified_evidence_sources, telegram_approval_payload, approval_review_message,
+                              approval_session_key,
                               rejection_confirmation_keyboard, rejection_reason_keyboard)
 
 
@@ -203,7 +206,8 @@ HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI rep
 
 
 def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(),
-                   review_buttons_enabled=False, rejection_actions_enabled=False):
+                   review_buttons_enabled=False, rejection_actions_enabled=False,
+                   approval_actions_enabled=False, approval_secret=""):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -227,8 +231,94 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 return CallbackReply(callback_id, "Telegram review is not enabled. Use the MCAD admin panel.")
             if not is_authorized_review_callback(callback, reviewer_ids):
                 return CallbackReply(callback_id, "Reviewer access is restricted.")
-            # Stage 3 handles confirmed, structured REJECTION only. Approval and
-            # corrections remain read-only previews until separately implemented.
+            # Stage 4 adds separately gated, expiring two-step PUBLIC approval.
+            # Stage 3 structured rejection continues unchanged.
+            approval = parse_approval_action(callback.get("data"))
+            if approval is not None:
+                if not approval_actions_enabled or not approval_secret:
+                    return CallbackReply(callback_id, "Telegram approval is disabled. Use the MCAD admin panel.")
+                stage, candidate_id, tick, signature = approval
+                reviewer_id = callback["from"]["id"]
+                chat_id = str(reviewer_id)
+                delivered = session.scalar(select(CandidateDelivery.id).join(
+                    CandidateNotification, CandidateDelivery.event_id == CandidateNotification.id
+                ).join(Subscriber, CandidateDelivery.chat_id == Subscriber.chat_id).where(
+                    CandidateNotification.candidate_id == candidate_id,
+                    CandidateDelivery.chat_id == chat_id,
+                    CandidateDelivery.status == "sent",
+                    Subscriber.active.is_(True),
+                ).limit(1))
+                if not delivered:
+                    return CallbackReply(callback_id, "This report was not delivered to your private subscription.")
+                state_key = approval_session_key(candidate_id, reviewer_id)
+                approval_state = session.get(WorkerState, state_key)
+                if stage == "cancel":
+                    if approval_state is not None:
+                        session.delete(approval_state)
+                    return CallbackReply(callback_id, "Publication cancelled. No changes saved.")
+                # A signed callback alone does not authorize publication: it
+                # must still match a saved, uncancelled review confirmation.
+                if stage == "confirm" and (not valid_approval_confirmation(
+                    candidate_id, reviewer_id, approval_secret, tick, signature
+                ) or approval_state is None or
+                    approval_state.value.get("callbackData") != callback.get("data")):
+                    return CallbackReply(callback_id, "Approval confirmation expired or invalid. Start review again.")
+                if session.bind.dialect.name == "sqlite" and stage == "confirm":
+                    # Acquire a SQLite writer lock: SELECT FOR UPDATE is a no-op.
+                    session.execute(update(Candidate).where(Candidate.id == candidate_id).values(status=Candidate.status))
+                candidate = session.scalar(select(Candidate).where(
+                    Candidate.id == candidate_id
+                ).with_for_update())
+                if candidate is None or candidate.status != "pending":
+                    return CallbackReply(callback_id, "This report is no longer awaiting review.")
+                approved_payload = telegram_approval_payload(candidate, reviewer_id)
+                if approved_payload is None:
+                    return CallbackReply(callback_id, "This report needs detailed verification in the web admin panel.")
+                source_items = verified_evidence_sources(candidate)
+                if stage == "start":
+                    keyboard = approval_confirmation_keyboard(candidate_id, reviewer_id, approval_secret)
+                    confirm_data = keyboard["inline_keyboard"][0][0]["callback_data"]
+                    if approval_state is None:
+                        session.add(WorkerState(name=state_key, value={"callbackData": confirm_data}))
+                    else:
+                        approval_state.value = {"callbackData": confirm_data}
+                    return CallbackReply(callback_id, "Check the sources before confirming publication.",
+                                         chat_id, approval_review_message(candidate, source_items), keyboard)
+                # A stale relationship/matching decision is not permission to
+                # overwrite an already-published record. Require web review.
+                source_urls = approved_payload["referenceUrls"]
+                collisions = session.scalar(select(Incident.id).where(or_(
+                    Incident.source_url.in_(source_urls),
+                    and_(func.lower(Incident.title) == approved_payload["title"].casefold(),
+                         Incident.year == approved_payload.get("year")),
+                )).limit(1))
+                reference_collision = session.scalar(select(IncidentSource.incident_id).where(
+                    IncidentSource.url.in_(source_urls)
+                ).limit(1))
+                if collisions or reference_collision:
+                    return CallbackReply(callback_id, "An existing incident may match. Review it in the MCAD admin panel.")
+                # Same conditional transition used for web approval. For Postgres
+                # the candidate row is also held FOR UPDATE through the write.
+                transitioned = session.execute(update(Candidate).where(
+                    Candidate.id == candidate_id, Candidate.status == "pending"
+                ).values(status="approved").execution_options(synchronize_session=False))
+                if transitioned.rowcount != 1:
+                    return CallbackReply(callback_id, "This report was already reviewed. No changes saved.")
+                incident, created = upsert_incident(session, approved_payload, notify=True,
+                                                    reviewed_candidate_id=candidate.id)
+                if not created:
+                    # A newly discovered match during the insert is an error, not
+                    # grounds to silently change an existing publication.
+                    raise RuntimeError("Telegram approval matched an existing incident unexpectedly")
+                candidate.status, candidate.incident_id = "approved", incident.id
+                evidence = dict(candidate.evidence or {})
+                history = list(evidence.get("telegramReviewHistory", []))
+                history.append({"decision": "approved", "reviewerId": chat_id,
+                                "reviewedAt": utcnow().isoformat() + "Z", "incidentId": incident.id})
+                evidence["telegramReviewHistory"] = history
+                candidate.evidence = evidence
+                session.delete(approval_state)
+                return CallbackReply(callback_id, "Published to MCAD. Incident ID: " + incident.id)
             rejection = parse_rejection_action(callback.get("data"))
             if rejection is not None:
                 if not rejection_actions_enabled:
@@ -397,7 +487,8 @@ class WorkerController:
                                               message_format=self.settings.telegram_message_format,
                                               reviewer_ids=self.settings.telegram_reviewer_ids,
                                               review_buttons_enabled=self.settings.enable_telegram_review_buttons,
-                                              rejection_actions_enabled=self.settings.enable_telegram_rejection_actions)
+                                              rejection_actions_enabled=self.settings.enable_telegram_rejection_actions,
+                                              approval_actions_enabled=self.settings.enable_telegram_approval_actions)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -423,6 +514,8 @@ class WorkerController:
                     reviewer_ids=self.settings.telegram_reviewer_ids,
                     review_buttons_enabled=self.settings.enable_telegram_review_buttons,
                     rejection_actions_enabled=self.settings.enable_telegram_rejection_actions,
+                    approval_actions_enabled=self.settings.enable_telegram_approval_actions,
+                    approval_secret=self.settings.telegram_bot_token,
                 )
                 if isinstance(reply, CallbackReply):
                     self.client.answer_callback(reply.callback_id, reply.text)

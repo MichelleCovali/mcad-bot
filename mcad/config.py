@@ -34,6 +34,7 @@ class Settings:
     # All interactive review is off unless both feature flags are enabled.
     enable_telegram_review_buttons: bool = False
     enable_telegram_rejection_actions: bool = False
+    enable_telegram_approval_actions: bool = False
     public_base_url: str = ""
     enable_workers: bool = True
     enable_feed_polling: bool = True
@@ -65,6 +66,7 @@ class Settings:
             telegram_reviewer_ids=parse_reviewer_ids(os.getenv("TELEGRAM_REVIEWER_IDS", "")),
             enable_telegram_review_buttons=env_bool("ENABLE_TELEGRAM_REVIEW_BUTTONS", False),
             enable_telegram_rejection_actions=env_bool("ENABLE_TELEGRAM_REJECTION_ACTIONS", False),
+            enable_telegram_approval_actions=env_bool("ENABLE_TELEGRAM_APPROVAL_ACTIONS", False),
             telegram_message_format=os.getenv("TELEGRAM_MESSAGE_FORMAT", "link").strip().lower(),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
             enable_workers=env_bool("ENABLE_BACKGROUND_WORKERS", True),
