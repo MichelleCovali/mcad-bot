@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   safeReferenceUrl,
   hasCoordinates,
@@ -25,7 +26,8 @@ function FieldValue({ value }) {
     <span>{text}</span>
   );
 }
-export function IncidentDetails({ incident, loading, error, onShowMap }) {
+export function IncidentDetails({ incident, loading, error, onShowMap, onCopyLink }) {
+  const [copyState, setCopyState] = useState("");
   if (loading && !incident) return <p role="status">Loading incident…</p>;
   if (!incident)
     return <p role="alert">{error || "Incident could not be loaded."}</p>;
@@ -114,11 +116,22 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
         <dt>Threat actor country</dt>
         <dd>{incident.attackerCountry || "Not recorded"}</dd>
       </dl>
-      {hasCoordinates(incident) && (
-        <button className="primary-action" onClick={onShowMap}>
-          Show on map
-        </button>
-      )}
+      <div className="explorer-detail-actions">
+        {hasCoordinates(incident) && (
+          <button type="button" onClick={onShowMap}>Show on map</button>
+        )}
+        {onCopyLink && (
+          <button type="button" onClick={async () => {
+            try {
+              await onCopyLink();
+              setCopyState("Link copied");
+            } catch {
+              setCopyState("Copy the incident link from the address bar.");
+            }
+          }}>Copy link</button>
+        )}
+        {copyState && <span role="status">{copyState}</span>}
+      </div>
       {(sourceUrl || references.length > 0) && (
         <section className="detail-section">
           <h3>References</h3>
@@ -127,18 +140,19 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
               references.map((source, i) => (
                 <li key={`${source.url}-${i}`}>
                   <a
+                    className="reference-link"
                     href={safeReferenceUrl(source.url)}
                     target="_blank"
                     rel="noopener noreferrer"
-                    title={source.shortName || undefined}
+                    title={source.url}
                   >
-                    {source.url}
+                    {source.shortName || source.url}
                   </a>
                 </li>
               ))
             ) : (
               <li>
-                <a href={sourceUrl} target="_blank" rel="noopener noreferrer">
+                <a className="reference-link" href={sourceUrl} target="_blank" rel="noopener noreferrer">
                   {sourceUrl}
                 </a>
               </li>
@@ -147,8 +161,8 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
         </section>
       )}
       {classification.length > 0 && (
-        <section className="detail-section">
-          <h3>Classification and record details</h3>
+        <details className="detail-section">
+          <summary>Classification and record details</summary>
           <dl className="detail-fields">
             {classification.map(([label, key]) => (
                 <div className="detail-field" key={key}>
@@ -159,11 +173,11 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
                 </div>
               ))}
           </dl>
-        </section>
+        </details>
       )}
       {originalFields.length > 0 && (
-        <section className="detail-section">
-          <h3>Original record</h3>
+        <details className="detail-section">
+          <summary>Original record</summary>
           <dl className="detail-fields original-fields">
             {originalFields.map(([label, value]) => (
                 <div className="detail-field" key={label}>
@@ -174,7 +188,7 @@ export function IncidentDetails({ incident, loading, error, onShowMap }) {
                 </div>
               ))}
           </dl>
-        </section>
+        </details>
       )}
       {incident.provenance?.length > 0 && (
         <p className="record-provenance">

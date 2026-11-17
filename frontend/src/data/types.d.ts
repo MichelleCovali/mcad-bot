@@ -16,6 +16,8 @@ export interface Incident {
   locationPrecision: string;
   locationSource: string;
   sourceUrl: string;
+  method: string;
+  countryFacets?: Partial<Record<"incidentCountry" | "victimCountry" | "attackerCountry", string[]>>;
   rawFields?: Record<string, unknown>;
   sources?: Array<{ url: string; shortName?: string; rawText?: string }>;
 }
@@ -26,7 +28,8 @@ export type IncidentFilterField =
   | "victimType"
   | "impactArea"
   | "incidentCountry"
-  | "attackerCountry";
+  | "attackerCountry"
+  | "method";
 export interface IncidentRequestOptions {
   signal?: AbortSignal;
 }

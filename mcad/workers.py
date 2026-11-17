@@ -19,6 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .models import Candidate, Delivery, Incident, OutboxEvent, ProcessedUpdate, Subscriber, WorkerLease, WorkerState, utcnow
 from .service import safe_url
 from .candidate_alerts import deliver_candidate_one
+from .telegram_feedback import CallbackAnswer, record_callback, record_comment, send_notification
 
 
 logger = logging.getLogger("mcad.workers")
@@ -89,14 +90,24 @@ class SendResult:
 
 
 class TelegramClient:
-    def __init__(self, token):
+    def __init__(self, token, *, feedback_enabled=True):
         self.token = token
+        self.feedback_enabled = feedback_enabled
 
     def send(self, chat_id, text):
+        return self._send(chat_id, text)
+
+    def send_with_feedback(self, chat_id, text, markup):
+        if self.feedback_enabled:
+            return self._send(chat_id, text, reply_markup=markup)
+        return self.send(chat_id, text)
+
+    def _send(self, chat_id, text, **options):
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{self.token}/sendMessage",
-                json={"chat_id": chat_id, "text": clean_text(text)[:4096], "link_preview_options": {"is_disabled": True}},
+                json={"chat_id": chat_id, "text": clean_text(text)[:4096],
+                      "link_preview_options": {"is_disabled": True}, **options},
                 timeout=20,
             )
             data = response.json()
@@ -110,9 +121,16 @@ class TelegramClient:
             # Never log the request URL: it contains the bot token.
             return SendResult(False)
 
+    def answer_callback(self, query_id, text):
+        try:
+            requests.post(f"https://api.telegram.org/bot{self.token}/answerCallbackQuery",
+                json={"callback_query_id": query_id, "text": text[:200], "show_alert": True}, timeout=10)
+        except requests.RequestException:
+            pass
+
     def get_updates(self, offset):
         try:
-            response = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params={"offset": offset, "timeout": 25, "allowed_updates": '["message"]'}, timeout=35)
+            response = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params={"offset": offset, "timeout": 25, "allowed_updates": '["message","callback_query"]'}, timeout=35)
             data = response.json()
             return data if isinstance(data, dict) else {"ok": False}
         except (requests.RequestException, ValueError):
@@ -158,7 +176,7 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
             text = f"{safe_url(base_url).rstrip('/')}/?incident={quote(str(payload['id']), safe='')}"
         else:
             text = notification_text(payload)
-        result = client.send(chat_id, text)
+        result = send_notification(client, chat_id, text, "p", delivery_id)
     with factory.begin() as session:
         delivery = session.scalar(select(Delivery).where(Delivery.id == delivery_id, Delivery.lease_owner == owner).with_for_update())
         if delivery is None:
@@ -181,7 +199,7 @@ def deliver_one(factory, client, base_url="", owner=None, now=None, message_form
     return True
 
 
-HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nAI reports require human review. Historical imports do not send alerts."
+HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI reports and published incidents\n/unsubscribe — stop alerts\n/latest — latest verified database incident\n/map — open the incident map\n/help — show commands\n\nRate an alert using its feedback buttons. To leave a comment, reply to that alert with /feedback followed by your comment.\n\nAI reports require human review. Historical imports do not send alerts."
 
 
 def process_update(factory, update_data, base_url=""):
@@ -199,12 +217,17 @@ def process_update(factory, update_data, base_url=""):
             state.value = {"offset": next_offset}
         else:
             session.add(WorkerState(name="telegram_offset", value={"offset": next_offset}))
+        callback = update_data.get("callback_query")
+        if isinstance(callback, dict):
+            return record_callback(session, callback)
         message = update_data.get("message") or {}
         chat = message.get("chat") or {}
-        if chat.get("type") != "private" or not isinstance(chat.get("id"), int):
-            return None
         text = message.get("text") or ""
         command = text.split()[0].lower().split("@")[0] if isinstance(text, str) and text.strip() else ""
+        if command == "/feedback":
+            return record_comment(session, message)
+        if chat.get("type") != "private" or not isinstance(chat.get("id"), int):
+            return None
         chat_id = str(chat["id"])
         if command == "/subscribe":
             set_subscription(session, chat_id, True)
@@ -257,7 +280,8 @@ class WorkerController:
         self.owner = str(uuid4())
         self.stopped = threading.Event()
         self.threads = []
-        self.client = TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
+        self.client = TelegramClient(settings.telegram_bot_token,
+            feedback_enabled=settings.enable_telegram_polling) if settings.telegram_bot_token else None
 
     def start(self):
         jobs = []
@@ -323,7 +347,9 @@ class WorkerController:
                 if self.stopped.is_set() or not claim_lease(self.factory, "telegram_polling", self.owner):
                     break
                 reply = process_update(self.factory, item, self.settings.public_base_url)
-                if reply:
+                if isinstance(reply, CallbackAnswer):
+                    self.client.answer_callback(reply.query_id, reply.text)
+                elif reply:
                     self.client.send(*reply)
                     self.stopped.wait(1.05)
 

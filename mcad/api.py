@@ -1,5 +1,4 @@
-"""Same-origin MCAD API and frontend hosting. Writes always require a server token."""
-import hmac
+"""Same-origin MCAD API and frontend hosting."""
 from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +6,8 @@ from zipfile import BadZipFile, LargeZipFile
 from xml.etree.ElementTree import ParseError
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -15,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from .auth_api import auth_router
 from .config import Settings
 from .db import get_session_factory, make_engine
 from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
@@ -46,7 +48,7 @@ def create_app(settings=None, engine=None):
 
     app = FastAPI(title="MCAD API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1000)
-    app.add_middleware(ProtectedRequestsMiddleware, admin_token=settings.admin_api_token)
+    app.add_middleware(ProtectedRequestsMiddleware, settings=settings, factory=factory)
     app.state.settings, app.state.engine, app.state.session_factory = settings, engine, factory
     if settings.cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_methods=["GET", "POST", "PATCH"], allow_headers=["Authorization", "Content-Type"])
@@ -56,11 +58,24 @@ def create_app(settings=None, engine=None):
             yield session
 
     def require_admin(request: Request):
-        if not settings.admin_api_token:
-            raise HTTPException(503, "Administration is not configured on this server.")
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(token.encode("utf-8"), settings.admin_api_token.encode("utf-8")):
-            raise HTTPException(401, "A valid administrator bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+        principal = require_reviewer(request)
+        if principal["role"] != "admin":
+            raise HTTPException(403, "Administrator access is required for this action.")
+        return principal
+
+    def require_reviewer(request: Request):
+        principal = getattr(request.state, "principal", None)
+        if principal is None:
+            raise HTTPException(401, "Sign in to open the administration workspace.")
+        return principal
+
+    app.include_router(auth_router(factory, settings, require_admin))
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        if request.url.path.startswith("/api/auth/"):
+            return JSONResponse(status_code=422, content={"detail": "Send a valid JSON object."})
+        return await request_validation_exception_handler(request, error)
 
     @app.exception_handler(ValueError)
     async def invalid_value(_request, error):
@@ -130,7 +145,7 @@ def create_app(settings=None, engine=None):
             result = incident_dict(incident, details=True)
         return result
 
-    @app.get("/api/admin/candidates", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/candidates", dependencies=[Depends(require_reviewer)])
     def list_candidates(status: str = "pending", session=Depends(session_dependency)):
         if status not in {"pending", "approved", "rejected", "all"}:
             raise HTTPException(422, "status must be pending, approved, rejected or all")
@@ -140,7 +155,7 @@ def create_app(settings=None, engine=None):
         candidates = list(session.scalars(query))
         return {"items": [candidate_dict(candidate) for candidate in candidates], "meta": {"total": len(candidates)}}
 
-    @app.get("/api/admin/catalogs", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/catalogs", dependencies=[Depends(require_reviewer)])
     def workbook_catalogs(session=Depends(session_dependency)):
         from .import_workbook import SOURCE_FIELDS
         from .service import camel_case
@@ -153,14 +168,14 @@ def create_app(settings=None, engine=None):
             "importBatchId": batch.id if batch else None,
         }
 
-    @app.get("/api/admin/candidates/{candidate_id}", dependencies=[Depends(require_admin)])
+    @app.get("/api/admin/candidates/{candidate_id}", dependencies=[Depends(require_reviewer)])
     def get_candidate(candidate_id: str, session=Depends(session_dependency)):
         candidate = session.get(Candidate, candidate_id)
         if candidate is None:
             raise HTTPException(404, "Candidate not found.")
         return candidate_dict(candidate)
 
-    @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_admin)])
+    @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_reviewer)])
     def approve_candidate(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):
         with session.begin():
             candidate = session.scalar(select(Candidate).where(Candidate.id == candidate_id).with_for_update())
@@ -202,7 +217,7 @@ def create_app(settings=None, engine=None):
 
     @app.post(
         "/api/admin/candidates/{candidate_id}/reject",
-        dependencies=[Depends(require_admin)]
+        dependencies=[Depends(require_reviewer)]
     )
     def reject_candidate(
         candidate_id: str,
@@ -347,6 +362,9 @@ def create_app(settings=None, engine=None):
         fields = ["source_rows", "accepted_rows", "quarantined_rows", "mapped_rows", "unmapped_rows", "created_records", "existing_records", "reused_batch", "notification_events_created"]
         from .service import camel_case
         return {camel_case(field): summary.get(field) for field in fields}
+
+    from .prompt_learning import learning_router
+    app.include_router(learning_router(factory, settings, require_admin))
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):

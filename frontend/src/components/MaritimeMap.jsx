@@ -166,6 +166,7 @@ function popupContent(incident, onSelectIncident) {
   const details = document.createElement("dl");
   [
     ["Year", incident.year],
+    ["Incident type", incident.method],
     ["Victim country", incident.victimCountry],
     ["Victim type", incident.victimType],
     ["Impact area", incident.impactArea],
@@ -189,7 +190,7 @@ function popupContent(incident, onSelectIncident) {
   const more = document.createElement("button");
   more.type = "button";
   more.className = "popup-more";
-  more.textContent = "More information";
+  more.textContent = "Open incident record";
   more.addEventListener("click", () => onSelectIncident?.(incident));
   content.appendChild(more);
   return content;

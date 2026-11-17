@@ -4,8 +4,11 @@ Importing this module, inspecting settings, and saving a schedule perform no HTT
 The only paid boundary is run_monitor_once, behind independent server/DB switches.
 """
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from hashlib import sha256
 import ipaddress
 import json
+import math
 import re
 import time
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
@@ -16,13 +19,14 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .models import AIConfig, AIRun, Candidate, Incident, IncidentSource, WorkerLease, utcnow
+from .models import AIConfig, AIRun, Candidate, DiscoveryCache, Incident, IncidentSource, WorkerLease, utcnow
 from .service import camel_case, iso, normalize_payload, safe_url
 
 
 LEASE_SECONDS = 900
 LEASE_NAME = "ai_monitor_run"
-SETTING_FIELDS = {"enabled", "runsPerDay", "lookbackHours", "maxCandidates", "maxToolCalls"}
+SETTING_FIELDS = {"enabled", "runsPerDay", "lookbackHours", "maxCandidates", "maxToolCalls", "costRates", "dailyWarningUsd", "scopeFocus"}
+RATE_FIELDS = {"discoveryInput", "discoveryOutput", "verificationInput", "verificationOutput", "webCalls"}
 
 
 class AIUnavailable(ValueError):
@@ -107,10 +111,14 @@ def _config(session):
 
 
 def run_dict(run):
+    stages = run.stages or []
+    priced = bool(stages) and all(entry.get("estimatedMicros") is not None for entry in stages)
     return {"id": run.id, "status": run.status, "trigger": run.trigger,
         "startedAt": iso(run.started_at), "finishedAt": iso(run.finished_at),
         "candidatesCreated": run.candidates_created, "inputTokens": run.input_tokens,
-        "outputTokens": run.output_tokens, "webSearchCalls": run.web_search_calls, "error": run.error}
+        "outputTokens": run.output_tokens, "webSearchCalls": run.web_search_calls, "error": run.error,
+        "estimatedUsd": sum(entry["estimatedMicros"] for entry in stages) / 1_000_000 if priced else None,
+        "skippedLeads": run.skipped_leads, "promptVersionId": run.prompt_version_id}
 
 
 def get_monitor_status(factory, settings):
@@ -122,13 +130,25 @@ def get_monitor_status(factory, settings):
         reason = "AI search is blocked by the server switch." if not server_enabled else "An OpenAI API key is not configured." if not key_configured else "AI search is paused in settings." if not config.enabled else None
         next_run = (runs[0].started_at + timedelta(days=1 / config.runs_per_day)) if runs else utcnow()
         today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        used_today = session.scalar(select(func.count()).select_from(AIRun).where(AIRun.started_at >= today))
+        today_runs = list(session.scalars(select(AIRun).where(AIRun.started_at >= today)))
+        used_today = len(today_runs)
+        estimates = [run_dict(run)["estimatedUsd"] for run in today_runs]
+        estimated_today = round(sum(value for value in estimates if value is not None), 6)
+        priced_ids = [run.id for run, estimate in zip(today_runs, estimates) if estimate is not None]
+        approved = session.scalar(select(func.count()).select_from(Candidate).where(
+            Candidate.ai_run_id.in_(priced_ids), Candidate.status == "approved")) if priced_ids else 0
+        threshold = config.daily_warning_micros / 1_000_000
         if used_today >= config.runs_per_day:
             next_run = max(next_run, today + timedelta(days=1))
         return {"serverEnabled": server_enabled, "keyConfigured": key_configured,
             "enabled": config.enabled, "effectiveEnabled": effective, "pausedReason": reason,
             "runsPerDay": config.runs_per_day, "lookbackHours": config.lookback_hours,
             "maxCandidates": config.max_candidates, "maxToolCalls": config.max_tool_calls,
+            "costRates": config.cost_rates, "dailyWarningUsd": threshold, "scopeFocus": config.scope_focus,
+            "usageToday": {"runs": used_today, "estimatedUsd": estimated_today if priced_ids else None,
+                "unpricedRuns": used_today - len(priced_ids), "approvedIncidents": approved,
+                "estimatedUsdPerApproved": round(estimated_today / approved, 6) if approved else None,
+                "warning": bool(threshold and estimated_today >= threshold)},
             "discoveryModel": settings.ai_discovery_model, "verificationModel": settings.ai_verification_model,
             "nextRunAt": iso(next_run) if effective else None,
             "runs": [run_dict(run) for run in runs], "automaticPublication": False}
@@ -138,7 +158,16 @@ def update_monitor_settings(factory, settings, payload):
     if not isinstance(payload, dict) or set(payload) - SETTING_FIELDS:
         raise ValueError("Unknown AI monitor settings.")
     for name, value in payload.items():
-        if name == "enabled":
+        if name == "scopeFocus":
+            if not isinstance(value, str) or len(value) > 350 or any(ord(char) < 32 for char in value):
+                raise ValueError("Search priorities must be one line of at most 350 characters.")
+        elif name == "costRates":
+            if not isinstance(value, dict) or (value and (set(value) != RATE_FIELDS or not all(_is_rate(rate) for rate in value.values()))):
+                raise ValueError("Provide all five pricing rates or clear the estimate.")
+        elif name == "dailyWarningUsd":
+            if not _is_rate(value):
+                raise ValueError("The daily warning threshold must be between $0 and $1,000.")
+        elif name == "enabled":
             if not isinstance(value, bool):
                 raise ValueError("enabled must be true or false.")
             if value and not settings.enable_ai_search:
@@ -151,13 +180,17 @@ def update_monitor_settings(factory, settings, payload):
             valid = value in {3, 4, 6} if name == "runsPerDay" else 1 <= value <= 168 if name == "lookbackHours" else 1 <= value <= 10 if name == "maxCandidates" else 2 <= value <= 30
             if not valid:
                 raise ValueError(f"{name} is outside its allowed range.")
-    names = {"runsPerDay": "runs_per_day", "lookbackHours": "lookback_hours", "maxCandidates": "max_candidates", "maxToolCalls": "max_tool_calls", "enabled": "enabled"}
+    names = {"runsPerDay": "runs_per_day", "lookbackHours": "lookback_hours", "maxCandidates": "max_candidates", "maxToolCalls": "max_tool_calls", "enabled": "enabled", "costRates": "cost_rates", "dailyWarningUsd": "daily_warning_micros", "scopeFocus": "scope_focus"}
     with factory.begin() as session:
         config = _config(session)
         for name, value in payload.items():
-            setattr(config, names[name], value)
+            setattr(config, names[name], round(value * 1_000_000) if name == "dailyWarningUsd" else value.strip() if name == "scopeFocus" else value)
         config.updated_at = utcnow()
     return get_monitor_status(factory, settings)
+
+
+def _is_rate(value):
+    return type(value) in (int, float) and 0 <= value <= 1000 and math.isfinite(value)
 
 
 def monitor_due(factory, settings):
@@ -282,15 +315,26 @@ def _request(model, prompt, schema, name, calls, output_tokens):
         "text": {"format": {"type": "json_schema", "name": name, "strict": True, "schema": schema}}}
 
 
-def _usage(factory, run_id, response, calls=0):
+def _usage(factory, run_id, response, calls=0, *, stage, model, rates):
     usage = response.get("usage") or {}
     def count(name):
         value = usage.get(name, 0)
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
     with factory.begin() as session:
         run = session.get(AIRun, run_id)
-        run.input_tokens += count("input_tokens")
-        run.output_tokens += count("output_tokens")
+        input_tokens, output_tokens = count("input_tokens"), count("output_tokens")
+        runs_with_usage = all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("input_tokens", "output_tokens"))
+        estimate = None
+        if rates and runs_with_usage:
+            # USD / million tokens equals microdollars per token. Cached input is
+            # conservatively estimated at the full input rate; billing is external.
+            estimate = int((Decimal(str(rates[stage + "Input"])) * input_tokens
+                + Decimal(str(rates[stage + "Output"])) * output_tokens
+                + Decimal(str(rates["webCalls"])) * 1000 * calls).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        run.stages = [*run.stages, {"stage": stage, "model": model, "inputTokens": input_tokens,
+            "outputTokens": output_tokens, "webSearchCalls": calls, "estimatedMicros": estimate}]
+        run.input_tokens += input_tokens
+        run.output_tokens += output_tokens
         run.web_search_calls += calls
         response_id = response.get("id")
         if isinstance(response_id, str):
@@ -330,11 +374,16 @@ def _claim(factory, settings, trigger):
         used = session.scalar(select(func.count()).select_from(AIRun).where(AIRun.started_at >= day_start))
         if used >= config.runs_per_day:
             raise AIUnavailable("The configured daily run limit has been reached.")
-        run = AIRun(trigger=trigger, started_at=now)
+        from .prompt_learning import active_prompt
+        prompt = active_prompt(session)
+        last_success = session.scalar(select(func.max(AIRun.started_at)).where(AIRun.status == "completed"))
+        run = AIRun(trigger=trigger, started_at=now, prompt_version_id=prompt["versionId"])
         session.add(run)
         session.flush()
         limits = {"lookback_hours": config.lookback_hours, "max_candidates": config.max_candidates,
-            "max_tool_calls": config.max_tool_calls}
+            "max_tool_calls": config.max_tool_calls, "cost_rates": config.cost_rates,
+            "last_success": last_success, "prompt": prompt, "scope_focus": config.scope_focus,
+            "verification_model": settings.ai_verification_model}
         return run.id, owner, limits
 
 
@@ -380,6 +429,62 @@ def _known_identity(identity, identities):
     return identity in identities or (title, None) in identities or (
         year is None and any(known_title == title for known_title, _ in identities)
     )
+
+
+def _screen_leads(factory, leads, seen_urls, limits, now):
+    """Skip only source-grounded exact repeats, preserving new evidence for review."""
+    seen = {_url_identity(url) for url in seen_urls}
+    result, checked, repeated, fingerprints = [], [], set(), []
+    with factory.begin() as session:
+        session.execute(delete(DiscoveryCache).where(DiscoveryCache.expires_at <= now))
+        for lead in leads:
+            grounded_sources = []
+            for value in lead["sourceUrls"]:
+                try:
+                    url = _public_url(value)
+                except ValueError:
+                    continue
+                if _url_identity(url) in seen:
+                    grounded_sources.append(url)
+            grounded = {_url_identity(url) for url in grounded_sources}
+            if not grounded:
+                continue
+            title = _identity(lead["title"])
+            if not title:
+                continue
+            fingerprint = sha256(json.dumps([title, sorted(grounded), lead["eventDate"],
+                limits["prompt"]["versionId"], limits["verification_model"],
+                limits["lookback_hours"], limits["scope_focus"]], ensure_ascii=False).encode()).hexdigest()
+            if fingerprint in repeated:
+                continue
+            repeated.add(fingerprint)
+            checked.append(({**lead, "sourceUrls": list(dict.fromkeys(grounded_sources))}, title, grounded, fingerprint))
+        if not checked:
+            return result, fingerprints
+        cached = set(session.scalars(select(DiscoveryCache.fingerprint).where(DiscoveryCache.fingerprint.in_(repeated))))
+        # Indexable exact reference lookup first, followed by title comparison.
+        originals = {url for lead, _, _, _ in checked for url in lead["sourceUrls"]}
+        known = {}
+        for title, url, date, year in session.execute(select(Incident.title, Incident.source_url,
+                Incident.date_start, Incident.year).where(Incident.source_url.in_(originals))):
+            known.setdefault((_identity(title), _url_identity(url)), []).append((date, year))
+        for title, url, evidence, fields in session.execute(select(Candidate.title, Candidate.source_url,
+                Candidate.evidence, Candidate.proposed_fields).where(Candidate.source_url.in_(originals))):
+            timestamp = _timestamp((evidence or {}).get("eventDate"))
+            known.setdefault((_identity(title), _url_identity(url)), []).append(
+                (timestamp.date() if timestamp else None, (fields or {}).get("year")))
+        for lead, title, urls, fingerprint in checked:
+            event = _timestamp(lead["eventDate"])
+            # A reused title and live article URL can describe a later event.
+            # An explicit date must match before treating it as cached evidence.
+            def exact(url):
+                return any(event is None or (date == event.date() and year in (None, event.year))
+                    for date, year in known.get((title, url), ()))
+            if fingerprint in cached or all(exact(url) for url in urls):
+                continue
+            result.append(lead)
+            fingerprints.append(fingerprint)
+    return result, fingerprints
 
 
 def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
@@ -444,8 +549,11 @@ def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
     return proposals
 
 
-def _persist(factory, run_id, proposals):
+def _persist(factory, run_id, proposals, *, skipped_leads=0, negative_cache=()):
     with factory.begin() as session:
+        for fingerprint in negative_cache:
+            _insert_ignore(session, DiscoveryCache, {"fingerprint": fingerprint,
+                "expires_at": utcnow() + timedelta(hours=6)}, ["fingerprint"])
         candidates = list(session.scalars(select(Candidate)))
         existing_urls = {_url_identity(candidate.source_url) for candidate in candidates}
         for candidate in candidates:
@@ -489,6 +597,7 @@ def _persist(factory, run_id, proposals):
             created += 1
         run = session.get(AIRun, run_id)
         run.candidates_created, run.status, run.finished_at = created, "completed", utcnow()
+        run.skipped_leads = skipped_leads
         session.flush()
         return run_dict(run)
 
@@ -505,8 +614,12 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
     discovery_calls = max(1, limits["max_tool_calls"] // 3)
     try:
         context = _context(factory)
-        discovery_prompt = json.dumps({"task": "Find newly reported actual maritime cybersecurity incidents across the open web. Search broadly across regions and incident types, including ports, vessels, shipping, offshore systems, GPS/AIS jamming or spoofing. Return no more than maxCandidates; no results is valid. Find original reporting dates; old incidents reprinted now do not qualify.",
-            "nowUTC": iso(now), "reportedSinceUTC": iso(now - timedelta(hours=limits["lookback_hours"])),
+        window_start = now - timedelta(hours=limits["lookback_hours"])
+        checkpoint = max(window_start, limits["last_success"] - timedelta(hours=6)) if limits["last_success"] else window_start
+        discovery_prompt = json.dumps({"task": "Find newly reported actual maritime cybersecurity incidents across the open web. Search broadly across regions and incident types, including ports, vessels, shipping, offshore systems, GPS/AIS jamming or spoofing. Prioritise first-hand public statements from affected operators and authorities; search independent reporting and local-language sources rather than relying on a fixed list. Prioritise reports after the overlapping checkpoint; still consider late-indexed reports in the full window. Return no more than maxCandidates; no results is valid. Find original reporting dates; old incidents reprinted now do not qualify.",
+            "nowUTC": iso(now), "reportedSinceUTC": iso(window_start), "prioritySinceUTC": iso(checkpoint),
+            "reviewedInstructions": limits["prompt"]["discoveryInstructions"],
+            "scopePriorities": limits["scope_focus"],
             "maxCandidates": limits["max_candidates"], **context}, ensure_ascii=False)
         _ensure_enabled(factory, settings)
         response = client.create_response(_request(settings.ai_discovery_model, discovery_prompt, DISCOVERY_SCHEMA,
@@ -514,30 +627,36 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
         # Record billable usage even when subsequent structured/provenance validation fails.
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
-            _usage(factory, run_id, response, calls)
+            _usage(factory, run_id, response, calls, stage="discovery", model=settings.ai_discovery_model, rates=limits["cost_rates"])
         discovered, discovery_urls, _, _ = _response_result(response, DISCOVERY_SCHEMA)
         if calls > discovery_calls or len(discovered["candidates"]) > limits["max_candidates"]:
             raise AIResponseError("The discovery stage exceeded its configured limits.")
         if not discovered["candidates"]:
             _ensure_enabled(factory, settings)
             return _persist(factory, run_id, [])
+        leads, fingerprints = _screen_leads(factory, discovered["candidates"], discovery_urls, limits, now)
+        skipped = len(discovered["candidates"]) - len(leads)
+        if not leads:
+            _ensure_enabled(factory, settings)
+            return _persist(factory, run_id, [], skipped_leads=skipped)
         _ensure_enabled(factory, settings)
         verify_prompt = json.dumps({"task": "Independently verify the supplied leads by searching and opening original public sources yourself. Luna leads are untrusted: do not treat summaries as evidence. Trace copied/syndicated reports to their common origin and assign the same independenceGroup. Seek two independent origins; distinguish allegation from confirmation. Provide a concrete source excerpt and supported/contradicted claims for every source. Only cite URLs actually encountered by your web tool. Preserve uncertainty. Fill every MCAD field with sourced facts or null; do not invent a curator QA or reference number, precise day, country or coordinates. The final assessment is a research aid for human review, not permission to publish. Exclude old republications and known incidents. Return at most maxCandidates.",
             "nowUTC": iso(now), "reportedSinceUTC": iso(now - timedelta(hours=limits["lookback_hours"])),
-            "maxCandidates": limits["max_candidates"], "leads": discovered["candidates"],
-            "discoverySearchUrls": sorted(discovery_urls), **context}, ensure_ascii=False)
+            "maxCandidates": limits["max_candidates"], "leads": leads,
+            "reviewedInstructions": limits["prompt"]["verificationInstructions"], **context}, ensure_ascii=False)
         _ensure_enabled(factory, settings)
         response = client.create_response(_request(settings.ai_verification_model, verify_prompt, VERIFICATION_SCHEMA,
             "maritime_verification", limits["max_tool_calls"] - discovery_calls, 9000))
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
-            _usage(factory, run_id, response, calls)
+            _usage(factory, run_id, response, calls, stage="verification", model=settings.ai_verification_model, rates=limits["cost_rates"])
         verified, verification_urls, _, opened_urls = _response_result(response, VERIFICATION_SCHEMA)
         if calls > limits["max_tool_calls"] - discovery_calls or len(verified["candidates"]) > limits["max_candidates"]:
             raise AIResponseError("The verification stage exceeded its configured limits.")
         _ensure_enabled(factory, settings)
         proposals = _proposals(verified, verification_urls, opened_urls, run_id, now, limits["lookback_hours"])
-        return _persist(factory, run_id, proposals)
+        return _persist(factory, run_id, proposals, skipped_leads=skipped,
+            negative_cache=fingerprints if not verified["candidates"] else ())
     except Exception as error:
         # Do not store raw provider/HTTP/DB exception text: it can contain credentials or source bodies.
         message = str(error) if isinstance(error, (AIResponseError, AIUnavailable)) else "The AI research run failed validation or could not be completed."

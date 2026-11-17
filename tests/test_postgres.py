@@ -166,3 +166,44 @@ def test_delivered_candidate_alert_does_not_repeat_on_human_publication(postgres
     assert count(factory, Incident) == 1
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(CandidateDelivery).where(CandidateDelivery.status == "sent")) == 1
+
+
+def test_invitation_redemption_and_last_admin_invariant_are_atomic(postgres_database):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mcad.auth import AccountConflict, InvalidInvite, accept_invite, create_admin, issue_invite, update_member
+    from mcad.auth_models import AdminUser
+
+    engine, factory = postgres_database
+    migrate(engine)
+    password = "disposable-account-password"
+    create_admin(factory, "existing@example.test", password)
+    _, stale_token = issue_invite(factory, "new@example.test", "admin")
+    _, token = issue_invite(factory, "new@example.test", "admin")
+    with pytest.raises(InvalidInvite):
+        accept_invite(factory, stale_token, password, "192.0.2.10")
+
+    def redeem(address):
+        try:
+            accept_invite(factory, token, password, address)
+        except InvalidInvite:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(redeem, ["192.0.2.11", "192.0.2.12"])) == [False, True]
+    with factory() as session:
+        member_ids = session.scalars(select(AdminUser.id)).all()
+        assert len(member_ids) == 2
+
+    def deactivate(member_id):
+        try:
+            update_member(factory, member_id, {"active": False})
+        except AccountConflict:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(deactivate, member_ids)) == [False, True]
+    with factory() as session:
+        assert len(session.scalars(select(AdminUser).where(AdminUser.active.is_(True))).all()) == 1

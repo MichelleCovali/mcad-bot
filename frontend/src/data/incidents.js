@@ -8,6 +8,7 @@ export const INCIDENT_FILTER_FIELDS = Object.freeze([
   "impactArea",
   "incidentCountry",
   "attackerCountry",
+  "method",
 ]);
 const textFields = [
   "victimCountry",
@@ -159,6 +160,15 @@ export function validateIncidents(payload) {
         invalidRecord(index, `${field} must be an object.`);
       if (record[field]) incident[field] = record[field];
     }
+    if (record.countryFacets && typeof record.countryFacets === "object") {
+      incident.countryFacets = {};
+      for (const role of ["incidentCountry", "victimCountry", "attackerCountry"]) {
+        const countries = record.countryFacets[role];
+        if (Array.isArray(countries)) {
+          incident.countryFacets[role] = countries.filter((country) => typeof country === "string");
+        }
+      }
+    }
     for (const field of [
       "sources",
       "actors",
@@ -182,6 +192,7 @@ async function requestJson(
     rawBody,
     contentType,
     filename,
+    sessionAuth = false,
   } = {},
 ) {
   if (signal?.aborted) {
@@ -193,6 +204,7 @@ async function requestJson(
   if (contentType) headers["Content-Type"] = contentType;
   if (filename) headers["X-Workbook-Filename"] = encodeURIComponent(filename);
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (sessionAuth && !["GET", "HEAD"].includes(method)) headers["X-MCAD-Request"] = "1";
   let response;
   try {
     response = await fetchImpl(url, {
@@ -205,16 +217,17 @@ async function requestJson(
           ? {}
           : { body: JSON.stringify(body) }),
       cache: "no-store",
+      ...(sessionAuth ? { credentials: "same-origin", redirect: "error" } : {}),
     });
   } catch (error) {
     if (signal?.aborted || error?.name === "AbortError") throw error;
     throw new Error(
-      "Could not load incidents. Check the API connection and CORS settings.",
+      sessionAuth ? "Could not connect to MCAD. Check your connection and try again." : "Could not load incidents. Check the API connection and CORS settings.",
       { cause: error },
     );
   }
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403)
+    if (!sessionAuth && (response.status === 401 || response.status === 403))
       throw new Error(
         "Administrator access was denied. Check your access token.",
       );
@@ -225,9 +238,11 @@ async function requestJson(
     } catch {
       /* keep bounded generic HTTP error */
     }
-    throw new Error(
+    const failure = new Error(
       detail || `The incidents API returned HTTP ${response.status}.`,
     );
+    failure.status = response.status;
+    throw failure;
   }
   try {
     return await response.json();
@@ -281,12 +296,45 @@ export function createAdminClient(
 ) {
   const cleanToken = String(token).trim();
   if (!cleanToken) throw new Error("Enter your administrator access token.");
-  const request = (path, options = {}) =>
+  return adminMethods((path, options = {}) =>
     requestJson(`${baseUrl}${path}`, {
       ...options,
       token: cleanToken,
       fetchImpl,
-    });
+    }));
+}
+
+export function createWorkspaceClient({ fetchImpl = globalThis.fetch, onSessionExpired } = {}) {
+  const request = async (path, options = {}) => {
+    try { return await requestJson(`/api${path}`, { ...options, fetchImpl, sessionAuth: true }); }
+    catch (failure) {
+      if (failure.status === 401 && path.startsWith("/admin/")) onSessionExpired?.();
+      throw failure;
+    }
+  };
+  const post = (path, body = {}) => request(path, { method: "POST", body });
+  return { ...adminMethods(request),
+    health: ({ signal } = {}) => request("/health", { signal }),
+    session: ({ signal } = {}) => request("/auth/session", { signal }),
+    login: (credentials) => post("/auth/login", credentials),
+    acceptInvite: (credentials) => post("/auth/accept-invite", credentials),
+    logout: () => post("/auth/logout"),
+    team: ({ signal } = {}) => request("/admin/team", { signal }),
+    invite: (payload) => post("/admin/team/invites", payload),
+    revokeInvite: (id) => request(`/admin/team/invites/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    updateMember: (id, payload) => request(`/admin/team/members/${encodeURIComponent(id)}`, { method: "PATCH", body: payload }),
+    learning: ({ signal } = {}) => request("/admin/learning", { signal }),
+    reviewFeedback: (id, payload) => post(`/admin/learning/feedback/${encodeURIComponent(id)}/review`, payload),
+    createVersion: (payload) => post("/admin/learning/versions", payload),
+    proposeVersion: () => post("/admin/learning/versions/propose"),
+    evaluateVersion: (id) => post(`/admin/learning/versions/${encodeURIComponent(id)}/evaluate`),
+    versionResults: (id) => request(`/admin/learning/versions/${encodeURIComponent(id)}/results`),
+    activateVersion: (id) => post(`/admin/learning/versions/${encodeURIComponent(id)}/activate`),
+    restoreVersion: (id) => post("/admin/learning/rollback", { versionId: id }),
+  };
+}
+
+function adminMethods(request) {
   return {
     candidates: async ({ signal, status = "pending" } = {}) => {
       if (!["pending", "rejected", "approved", "all"].includes(status))

@@ -9,7 +9,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from mcad.ai_monitor import (
     AIUnavailable, FIELD_TYPES, get_monitor_status, monitor_due,
@@ -18,7 +18,7 @@ from mcad.ai_monitor import (
 from mcad.config import Settings
 from mcad.db import get_session_factory, make_engine
 from mcad.migrations import migrate
-from mcad.models import AIConfig, AIRun, Candidate, Incident, OutboxEvent, WorkerLease, utcnow
+from mcad.models import AIConfig, AIRun, Candidate, DiscoveryCache, Incident, OutboxEvent, WorkerLease, utcnow
 from mcad.service import iso, upsert_incident
 
 
@@ -118,6 +118,49 @@ class MonitorTests(unittest.TestCase):
                 update_monitor_settings(self.factory, self.settings, payload)
         with self.assertRaises(AIUnavailable):
             update_monitor_settings(self.factory, replace(self.settings, enable_ai_search=False), {"enabled": True})
+
+    def test_exact_known_lead_and_untraceable_urls_do_not_spend_on_verification(self):
+        self.enable()
+        first = run_monitor_once(self.factory, self.settings, client=self.happy_client())
+        self.assertEqual(first["candidatesCreated"], 1)
+        leads = discovery()
+        leads["candidates"].append({**leads["candidates"][0], "title": "Unsupported guess",
+            "sourceUrls": ["file:///private", "https://unknown.example.net/missing"]})
+        client = FakeClient(response(leads))
+        second = run_monitor_once(self.factory, self.settings, client=client)
+        self.assertEqual((second["status"], second["skippedLeads"], len(client.requests)), ("completed", 2, 1))
+
+    def test_empty_verification_is_cached_temporarily_and_pricing_uses_stage_usage(self):
+        self.enable(dailyWarningUsd=0.04, scopeFocus="North Sea ports", costRates={
+            "discoveryInput": 1, "discoveryOutput": 2, "verificationInput": 3,
+            "verificationOutput": 4, "webCalls": 10})
+        first_client = FakeClient(response(discovery()), response({"candidates": []}, opened=True))
+        first = run_monitor_once(self.factory, self.settings, client=first_client)
+        self.assertEqual(first["estimatedUsd"], 0.04064)
+        self.assertIn("North Sea ports", first_client.requests[0]["input"][1]["content"])
+        self.assertTrue(get_monitor_status(self.factory, self.settings)["usageToday"]["warning"])
+        second_client = FakeClient(response(discovery()))
+        second = run_monitor_once(self.factory, self.settings, client=second_client)
+        self.assertEqual((second["estimatedUsd"], second["skippedLeads"], len(second_client.requests)), (0.01018, 1, 1))
+        with self.factory.begin() as session:
+            session.execute(update(DiscoveryCache).values(expires_at=utcnow() - timedelta(seconds=1)))
+        third = run_monitor_once(self.factory, self.settings, client=self.happy_client())
+        self.assertEqual(third["candidatesCreated"], 1)
+
+    def test_repeat_title_and_rolling_source_allow_a_new_dated_incident(self):
+        self.enable()
+        now = utcnow()
+        with self.factory.begin() as session:
+            upsert_incident(session, {"title": "Fictional port incident", "sourceUrl": URL_A,
+                "dateStart": f"{now.year - 1}-02-02", "year": now.year - 1}, notify=False)
+        discovered = discovery()
+        discovered["candidates"][0]["eventDate"] = now.date().isoformat()
+        client = FakeClient(response(discovered), response(verification(), opened=True))
+        run = run_monitor_once(self.factory, self.settings, client=client)
+        self.assertEqual((run["status"], run["skippedLeads"], len(client.requests)), ("completed", 0, 2))
+        with self.factory() as session:
+            candidate = session.scalar(select(Candidate))
+            self.assertEqual(candidate.verification_status, "needs_review")
 
     def test_two_models_independent_research_save_pending_candidate_without_publication(self):
         self.enable()

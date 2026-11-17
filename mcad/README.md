@@ -9,7 +9,7 @@ It does not run the legacy `bot.py` or `commands.py` loops.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection URL in production. Required on Railway; local default is `sqlite:///./data/mcad.sqlite3`. |
-| `ADMIN_API_TOKEN` | Server-side secret protecting every write, candidate review and workbook upload. Without it administration returns HTTP 503. |
+| `ADMIN_API_TOKEN` | Optional bearer credential for trusted maintenance scripts. Browser accounts use individual sessions. |
 | `PUBLIC_BASE_URL` | Public HTTPS site URL used in `/map` and notification deep links. |
 | `TELEGRAM_BOT_TOKEN` | Optional existing bot token. When absent, no Telegram network requests run. |
 | `TELEGRAM_CHAT_ID` | Optional explicitly configured initial recipient. Startup never reverses an existing unsubscribe. |
@@ -58,7 +58,7 @@ Public reads:
 - `GET /api/incidents/{id}` also returns all original `rawFields`, sources,
   organisations, actors, locations and import provenance.
 
-Administrator operations require `Authorization: Bearer <ADMIN_API_TOKEN>`:
+Administration requires a signed-in account with the appropriate role, or the optional `Authorization: Bearer <ADMIN_API_TOKEN>` credential for trusted scripts. Browser writes carry `X-MCAD-Request: 1` and use the same origin. See [operations](../docs/operations.md) for the role and invite workflow.
 
 - `POST /api/incidents` creates or idempotently updates a source record.
 - `PATCH /api/incidents/{id}` edits a record. Normal edits do not resend alerts.

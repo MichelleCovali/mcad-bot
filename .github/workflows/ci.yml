@@ -18,6 +18,7 @@ env:
   ENABLE_FEED_POLLING: "false"
   ENABLE_TELEGRAM_POLLING: "false"
   ENABLE_AI_SEARCH: "false"
+  ENABLE_AI_FEEDBACK: "false"
   OPENAI_API_KEY: ""
   TELEGRAM_BOT_TOKEN: ""
   TELEGRAM_CHAT_ID: ""
@@ -120,6 +121,7 @@ jobs:
             --env ENABLE_FEED_POLLING=false \
             --env ENABLE_TELEGRAM_POLLING=false \
             --env ENABLE_AI_SEARCH=false \
+            --env ENABLE_AI_FEEDBACK=false \
             --env OPENAI_API_KEY= \
             --env TELEGRAM_BOT_TOKEN= \
             --env TELEGRAM_CHAT_ID= \

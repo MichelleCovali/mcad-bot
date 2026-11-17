@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import Candidate, CandidateDelivery, CandidateNotification, Subscriber, utcnow
 from .service import safe_url
+from .telegram_feedback import send_notification
 
 
 def create_candidate_notification(session, candidate):
@@ -125,7 +126,8 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
             delivery.status = "cancelled"
             delivery.last_error = "unsubscribed" if not active else "candidate_not_pending"
             return True
-        result = client.send(delivery.chat_id, candidate_notification_text(event.payload, base_url, message_format))
+        result = send_notification(client, delivery.chat_id,
+            candidate_notification_text(event.payload, base_url, message_format), "c", delivery.id)
         if result.ok:
             delivery.status, delivery.sent_at = "sent", now
             delivery.telegram_message_id, delivery.last_error = result.message_id, None

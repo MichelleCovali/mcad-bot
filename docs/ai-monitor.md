@@ -31,7 +31,7 @@ Daily quotas use UTC and include manual, failed, and interrupted attempts becaus
 attempts may already have incurred usage. A database lease prevents overlapping workers
 or manual runs. There are no automatic provider retries.
 
-Administrator endpoints (all require the existing bearer token):
+Administrator endpoints (administrator session or optional maintenance bearer credential):
 
 - `GET /api/admin/ai-monitor`: settings, readiness and recent runs.
 - `PATCH /api/admin/ai-monitor`: save settings; this request does not run a search.
@@ -51,6 +51,12 @@ allegations from confirmation, and newly reported incidents from old stories rep
 today. Limited recent database titles and rejection feedback help avoid repeats and
 known classification mistakes. Retrieved pages and stored feedback are treated as
 untrusted content, not instructions.
+
+Discovery prioritises the overlap around the last successful run and still considers the
+configured reporting window, so late-indexed sources can qualify. Only leads grounded in
+the discovery tool's sources reach verification. Exact repeats are screened before spending
+on the second model; a fully empty verification result can be reused for six hours for the
+same lead and configuration. A changed lead or new evidence can be verified again.
 
 Structured results are checked locally before storage. Each evidence URL must appear
 in the verifier's actual tool results or citation trail; excerpts and supported or

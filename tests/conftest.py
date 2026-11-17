@@ -14,6 +14,7 @@ for name, value in {
     "ENABLE_FEED_POLLING": "false",
     "ENABLE_TELEGRAM_POLLING": "false",
     "ENABLE_AI_SEARCH": "false",
+    "ENABLE_AI_FEEDBACK": "false",
     "OPENAI_API_KEY": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_CHAT_ID": "",

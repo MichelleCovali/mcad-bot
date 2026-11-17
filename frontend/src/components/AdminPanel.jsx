@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { createAdminClient, safeReferenceUrl } from "../data/incidents.js";
+import { safeReferenceUrl } from "../data/incidents.js";
 import { candidateDraft, reviewedIncidentPayload, REJECTION_PUBLICATION_BLOCK, submitReviewedIncident, requestedReviewCandidate } from "../data/review.js";
-import { AIMonitorSettings } from "./AIMonitorSettings.jsx";
-import { TelegramSettings } from "./TelegramSettings.jsx";
 
 const fields = [
   ["title", "Title", true],
@@ -81,12 +79,8 @@ function EvidenceDetails({ candidate }) {
     {[ ["Uncertainties", evidence.uncertainties], ["Contradictions", evidence.contradictions] ].map(([label, items]) => Array.isArray(items) && items.length > 0 && <div key={label}><h4>{label}</h4><ul>{items.map((item, index) => <li key={index}>{String(item)}</li>)}</ul></div>)}
   </section>;
 }
-export function AdminPanel({ onChanged }) {
-  const tokenInput = useRef(null);
-  const fileInput = useRef(null);
+export function AdminPanel({ client, canCreate, onChanged }) {
   const queueRequest = useRef(null);
-  const [token, setToken] = useState("");
-  const [client, setClient] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [queueStatus, setQueueStatus] = useState("pending");
   const [catalogs, setCatalogs] = useState({});
@@ -99,8 +93,6 @@ export function AdminPanel({ onChanged }) {
   const [rejectionNotes, setRejectionNotes] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [workbook, setWorkbook] = useState(null);
-  const [importReport, setImportReport] = useState(null);
   useEffect(() => {
     if (!client) return;
     const controller = new AbortController();
@@ -115,31 +107,22 @@ export function AdminPanel({ onChanged }) {
     return () => controller.abort();
   }, [client]);
   useEffect(() => () => queueRequest.current?.abort(), []);
-  async function login(event) {
-    event.preventDefault();
+  useEffect(() => {
+    const controller = new AbortController();
+    queueRequest.current = controller;
     setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      const connection = createAdminClient(token);
-      const records = await connection.candidates();
+    client.candidates({ signal: controller.signal }).then(async (records) => {
+      if (controller.signal.aborted) return;
       setCandidates(records);
-      setQueueStatus("pending");
-      setClient(connection);
-      setToken("");
-      try {
-        const requested = await requestedReviewCandidate(connection, records, window.location.search);
-        if (requested) choose(requested);
-      } catch (failure) {
-        setError(`The linked report could not be opened. ${failure.message}`);
-      }
-    } catch (failure) {
-      setError(failure.message);
-      tokenInput.current?.focus();
-    } finally {
-      setBusy(false);
-    }
-  }
+      const requested = await requestedReviewCandidate(client, records, window.location.search);
+      if (requested && !controller.signal.aborted) choose(requested);
+    }).catch((failure) => {
+      if (!controller.signal.aborted) setError(failure.message);
+    }).finally(() => {
+      if (!controller.signal.aborted) setBusy(false);
+    });
+    return () => controller.abort();
+  }, [client]);
   function choose(candidate) {
     setSelected(candidate);
     setShowRejectForm(false);
@@ -174,7 +157,7 @@ export function AdminPanel({ onChanged }) {
   }
   async function publish(event) {
     event.preventDefault();
-    if (busy || (selected && selected.status !== "pending")) return;
+    if (busy || (selected ? selected.status !== "pending" : !canCreate)) return;
     if (showRejectForm) return setError(REJECTION_PUBLICATION_BLOCK);
     setError("");
     setMessage("");
@@ -232,80 +215,9 @@ export function AdminPanel({ onChanged }) {
     }
   }
 
-  async function importWorkbook(event) {
-    event.preventDefault();
-    setError("");
-    setMessage("");
-    setImportReport(null);
-    setBusy(true);
-    try {
-      const report = await client.importWorkbook(workbook);
-      setImportReport(report);
-      setWorkbook(null);
-      if (fileInput.current) fileInput.current.value = "";
-      setMessage(
-        "Workbook import complete. Historical records were imported without sending notifications.",
-      );
-      onChanged?.(report);
-    } catch (failure) {
-      setError(failure.message);
-    } finally {
-      setBusy(false);
-    }
-  }
   const readOnly = Boolean(selected && selected.status !== "pending");
-  if (!client)
-    return (
-      <div className="admin-panel">
-        <p>Sign in to review reports and publish verified incidents.</p>
-        <form onSubmit={login} className="admin-login">
-          <label>
-            Administrator access token
-            <input
-              ref={tokenInput}
-              type="password"
-              autoComplete="off"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              required
-            />
-          </label>
-          <button className="primary-action" disabled={busy}>
-            {busy ? "Connecting…" : "Sign in"}
-          </button>
-        </form>
-        {error && (
-          <p className="inline-error" role="alert">
-            {error}
-          </p>
-        )}
-        <p className="admin-help">
-          Access is kept only in memory for this open panel. Closing it signs
-          you out.
-        </p>
-      </div>
-    );
   return (
-    <div className="admin-panel">
-      <div className="admin-toolbar">
-        <p>{candidates.length} {queueStatus} reports</p>
-        <button
-          type="button"
-          onClick={() => {
-            setClient(null);
-            setToken("");
-            setValues({});
-            setSelected(null);
-            setWorkbook(null);
-            setImportReport(null);
-            setCatalogs({});
-            setCatalogError("");
-            queueRequest.current?.abort();
-          }}
-        >
-          Sign out
-        </button>
-      </div>
+    <div className="admin-panel admin-review">
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -316,64 +228,7 @@ export function AdminPanel({ onChanged }) {
           {message}
         </p>
       )}
-      <AIMonitorSettings client={client} onRunComplete={refreshAfterSave} />
-      <TelegramSettings client={client} />
-      <details className="workbook-import">
-        <summary>Import a historical workbook</summary>
-        <p>
-          Import an .xlsx workbook of up to 10 MB. Original fields and source
-          rows are preserved. This historical import does not send Telegram
-          notifications.
-        </p>
-        <form onSubmit={importWorkbook} className="admin-login">
-          <label>
-            Excel workbook
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              onChange={(event) => setWorkbook(event.target.files?.[0] ?? null)}
-              disabled={busy}
-              required
-            />
-          </label>
-          <button
-            type="submit"
-            className="primary-action"
-            disabled={busy || !workbook}
-          >
-            {busy ? "Working…" : "Import workbook without notifications"}
-          </button>
-        </form>
-        {importReport && (
-          <dl className="detail-fields import-report">
-            {[
-              ["Source rows", "sourceRows"],
-              ["Accepted rows", "acceptedRows"],
-              ["Mapped rows", "mappedRows"],
-              ["Unmapped rows", "unmappedRows"],
-              ["Created records", "createdRecords"],
-              ["Existing records", "existingRecords"],
-              ["Quarantined rows", "quarantinedRows"],
-              ["Notification events", "notificationEventsCreated"],
-            ].map(([label, key]) => (
-              <div className="detail-field" key={key}>
-                <dt>{label}</dt>
-                <dd>{importReport[key] ?? "Not reported"}</dd>
-              </div>
-            ))}
-            <dt>Previously imported batch</dt>
-            <dd>
-              {importReport.reusedBatch ? "Yes — no duplicate import" : "No"}
-            </dd>
-          </dl>
-        )}
-      </details>
-      <details
-        className="candidate-queue"
-        open={!selected && Object.keys(values).length === 0}
-      >
-        <summary>Review incoming reports</summary>
+      {!(selected || Object.keys(values).length > 0) && <section className="candidate-queue workspace-card" aria-label="Incoming reports">
         <div className="review-queue-toolbar">
           <label>Report status
             <select value={queueStatus} disabled={busy} onChange={(event) => changeQueue(event.target.value)}>
@@ -384,7 +239,8 @@ export function AdminPanel({ onChanged }) {
           </label>
           <button type="button" className="secondary-action" disabled={busy} onClick={() => changeQueue(queueStatus)}>Refresh reports</button>
         </div>
-        {!candidates.length ? (
+        <p className="workspace-muted" aria-live="polite">{busy ? "Updating reports…" : `${candidates.length} ${queueStatus} reports`}</p>
+        {busy && !candidates.length ? null : !candidates.length ? (
           <p>{queueStatus === "pending" ? "No reports awaiting review." : `No ${queueStatus} reports.`}</p>
         ) : (
           <ul>
@@ -410,20 +266,21 @@ export function AdminPanel({ onChanged }) {
             ))}
           </ul>
         )}
-      </details>
-      <button
+      </section>}
+      {canCreate && !selected && Object.keys(values).length === 0 && <button
         type="button"
         className="secondary-action"
         disabled={busy}
         onClick={() => choose(null)}
       >
         Add a new incident
-      </button>
+      </button>}
       {(selected || Object.keys(values).length > 0) && (
-        <form className="incident-form" onSubmit={publish}>
+        <form className="incident-form workspace-card" onSubmit={publish}>
+          <button type="button" className="secondary-action" disabled={busy} onClick={() => { choose(null); setValues({}); }}>Back to queue</button>
           <h2>{readOnly ? `${selected.status === "rejected" ? "Rejected" : "Approved"} report` : selected ? "Verify and publish report" : "New incident"}</h2>
           {readOnly && <p className="admin-help">This report is read-only. Completed reviews cannot be published again from this queue.</p>}
-          {selected?.status === "approved" && <p className="admin-help">The fields below show the original source proposal. {selected.incidentId && <a href={`/?incident=${encodeURIComponent(selected.incidentId)}`} target="_blank" rel="noopener noreferrer">View the published record with the reviewer’s changes.</a>}</p>}
+          {selected?.status === "approved" && <p className="admin-help">The fields below show the original source proposal. {selected.incidentId && <a href={new URL(`/?incident=${encodeURIComponent(selected.incidentId)}`, import.meta.env.VITE_PUBLIC_ORIGIN || window.location.origin).href} target="_blank" rel="noopener noreferrer">View the published record with the reviewer’s changes.</a>}</p>}
           {selected?.status === "rejected" && <section className="review-feedback"><h3>Saved rejection feedback</h3><p><strong>{rejectionLabels[selected.rejectionReason] || selected.rejectionReason || "Reason not recorded"}</strong></p><p>{selected.rejectionNotes || "No additional explanation."}</p></section>}
           {selected && <EvidenceDetails candidate={selected} />}
           <p>

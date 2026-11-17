@@ -9,6 +9,7 @@ queues a message for subscribed Telegram chats.
 
 - [Hosted map](https://mcad-web-production.up.railway.app/)
 - [Administration](https://mcad-web-production.up.railway.app/admin)
+- [Operations workspace, invitations and release setup](docs/operations.md)
 - [Hosting, local development and Telegram setup](docs/hosting.md)
 - [Workbook import and data model](docs/data-import.md)
 - [AI monitor configuration and paused setup](docs/ai-monitor.md)
@@ -19,13 +20,14 @@ The Docker deployment uses PostgreSQL. Local development can use SQLite.
 RSS keyword matches require human review before publication. Location and date
 precision from the original records are preserved.
 
-The administrator can review, publish or reject candidates and inspect saved
-rejection feedback. The optional AI monitor discovers and cross-checks sources
+Administrators and reviewers sign in with individual accounts. The map and list
+share search and filters for incident type, country and year. The optional AI monitor discovers and cross-checks sources
 before preparing candidates in the same workbook structure. It is disabled by
 default: adding `OPENAI_API_KEY` or saving a schedule does not start a search.
 New, source-checked AI candidates notify subscribed Telegram chats once, while
 uncertain or potentially duplicate reports stay in the website queue. Publication
-still requires human approval. Existing Telegram message formatting is preserved.
+still requires human approval. Telegram alerts retain their existing message text
+and can collect ratings and comments for moderated prompt regression cases.
 GitHub Actions checks every push and pull request; see [automated checks](docs/ci.md).
 
 ## Legacy local prototype

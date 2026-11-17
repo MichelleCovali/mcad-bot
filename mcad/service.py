@@ -255,6 +255,22 @@ def incident_dict(incident, details=False):
     data = {camel_case(column.name): getattr(incident, column.name) for column in Incident.__table__.columns if column.name not in excluded}
     for key in ["dateStart", "createdAt", "updatedAt"]:
         data[key] = iso(data[key])
+    raw = incident.raw_fields or {}
+    relations = raw.get("_country_relations")
+    country_facets = {}
+    if isinstance(relations, dict):
+        for field in ("incident_country", "victim_country", "attacker_country"):
+            entries = relations.get(field)
+            if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+                continue
+            labels = list(dict.fromkeys(entry["name"] for entry in entries if isinstance(entry.get("name"), str)))
+            current = getattr(incident, field) or ""
+            parts = [part.strip() for part in current.split(",") if part.strip()]
+            # Edited records use their current values, not an outdated workbook snapshot.
+            if labels and (current == ", ".join(labels) or parts == [entry.get("source") for entry in entries]):
+                country_facets[camel_case(field)] = labels
+    if country_facets:
+        data["countryFacets"] = country_facets
     if details:
         data["rawFields"] = incident.raw_fields
         data["sources"] = [{"url": x.url, "shortName": x.short_name, "rawText": x.raw_text} for x in incident.sources]

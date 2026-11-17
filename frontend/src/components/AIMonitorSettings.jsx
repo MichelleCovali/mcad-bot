@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
 
+const rateLabels = {
+  discoveryInput: "Discovery input ($ / 1M tokens)", discoveryOutput: "Discovery output ($ / 1M tokens)",
+  verificationInput: "Verification input ($ / 1M tokens)", verificationOutput: "Verification output ($ / 1M tokens)",
+  webCalls: "Web search ($ / 1,000 calls)",
+};
+const usd = (amount) => amount == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(amount);
+
 function readableDate(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -17,7 +24,8 @@ export function AIMonitorSettings({ client, onRunComplete }) {
     setStatus(result);
     setDraft({ enabled: Boolean(result.enabled), runsPerDay: result.runsPerDay,
       lookbackHours: result.lookbackHours, maxCandidates: result.maxCandidates,
-      maxToolCalls: result.maxToolCalls });
+      maxToolCalls: result.maxToolCalls, scopeFocus: result.scopeFocus || "",
+      dailyWarningUsd: result.dailyWarningUsd ?? 0, costRates: result.costRates || {} });
   }
 
   useEffect(() => {
@@ -44,7 +52,10 @@ export function AIMonitorSettings({ client, onRunComplete }) {
     setError("");
     setMessage("");
     try {
-      const result = await client.saveAISettings({ ...draft, enabled: status.serverEnabled && draft.enabled });
+      const entries = Object.keys(rateLabels).filter((key) => draft.costRates[key] !== undefined && draft.costRates[key] !== "");
+      if (entries.length > 0 && entries.length !== Object.keys(rateLabels).length) throw new Error("Enter every rate or leave them all blank.");
+      const costRates = Object.fromEntries(entries.map((key) => [key, Number(draft.costRates[key])]));
+      const result = await client.saveAISettings({ ...draft, costRates, dailyWarningUsd: Number(draft.dailyWarningUsd), enabled: status.serverEnabled && draft.enabled });
       accept(result);
       setMessage(result.effectiveEnabled ? "Monitor settings saved. Scheduled AI searches are enabled." : "Monitor settings saved. AI search remains paused.");
     } catch (failure) { setError(failure.message); }
@@ -72,8 +83,8 @@ export function AIMonitorSettings({ client, onRunComplete }) {
   }
 
   return (
-    <details className="ai-monitor-settings">
-      <summary>AI monitoring settings — {status?.effectiveEnabled ? "enabled" : "paused"}</summary>
+    <section className="workspace-card ai-monitor-settings">
+      <h2>Open-web monitoring</h2>
       {error && <p className="inline-error" role="alert">{error}</p>}
       {message && <p className="success-message" role="status">{message}</p>}
       {!status ? (
@@ -88,6 +99,14 @@ export function AIMonitorSettings({ client, onRunComplete }) {
           </p>
           {!status.serverEnabled && <p className="admin-help">OpenAI search is disabled on the server. You can prepare the schedule, but enabling or running a search is locked.</p>}
           <p className="admin-help">OpenAI API key: {status.keyConfigured ? "configured on the server" : "not configured"}. Discovery: {status.discoveryModel}. Verification: {status.verificationModel}.</p>
+          <div className="workspace-stats" aria-label="UTC daily discovery usage">
+            {[["Runs today (UTC)", `${status.usageToday?.runs ?? 0} / ${status.runsPerDay}`],
+              ["Estimated spend", usd(status.usageToday?.estimatedUsd)],
+              ["Per approved incident", usd(status.usageToday?.estimatedUsdPerApproved)],
+              ["Next search", readableDate(status.nextRunAt)]].map(([label, value]) => <div className="workspace-card workspace-stat" key={label}><p>{label}</p><strong>{value}</strong></div>)}
+          </div>
+          {status.usageToday?.warning && <p className="inline-error" role="alert">Estimated discovery spend reached the daily warning threshold of {usd(status.dailyWarningUsd)}.</p>}
+          {status.usageToday?.unpricedRuns > 0 && <p className="workspace-muted">{status.usageToday.unpricedRuns} runs without an estimate are excluded from totals.</p>}
           <form onSubmit={save}>
             <label className="monitor-toggle">
               <input type="checkbox" checked={draft.enabled} disabled={busy || !status.serverEnabled || (!status.keyConfigured && !draft.enabled)}
@@ -112,8 +131,24 @@ export function AIMonitorSettings({ client, onRunComplete }) {
                 <input type="number" min="2" max="30" step="1" required value={draft.maxToolCalls} disabled={busy}
                   onChange={(event) => setDraft({ ...draft, maxToolCalls: Number(event.target.value) })} />
               </label>
+              <label className="wide-field">Search priorities (optional)
+                <input maxLength={350} placeholder="e.g. North Sea ports, vessel navigation and satellite interference" value={draft.scopeFocus} disabled={busy}
+                  onChange={(event) => setDraft({ ...draft, scopeFocus: event.target.value })} />
+              </label>
             </div>
-            <p className="admin-help">The agent searches the open web and compares original sources. Results enter the review queue; publication and Telegram notifications require approval. Token and tool limits constrain usage, but are not a guaranteed dollar cap.</p>
+            <p className="admin-help">Priorities guide the search across the open web. Source-checked reports may be sent to Telegram for review; publishing to the public archive requires a reviewer.</p>
+            <details className="workspace-card workspace-disclosure">
+              <summary>Spend estimates and warning threshold</summary>
+              <p className="admin-help">Enter the rates from your <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">OpenAI pricing plan</a> for future estimates. Estimates exclude prompt analysis and may differ from billing. This warning appears in the dashboard; it does not stop a run.</p>
+              <div className="incident-form-grid">
+                {Object.entries(rateLabels).map(([key, label]) => <label key={key}>{label}
+                  <input type="number" min="0" max="1000" step="0.001" value={draft.costRates[key] ?? ""} disabled={busy} onChange={(e) => setDraft({ ...draft, costRates: { ...draft.costRates, [key]: e.target.value } })} />
+                </label>)}
+                <label>Daily warning (USD, 0 = off)
+                  <input type="number" min="0" max="1000" step="0.01" value={draft.dailyWarningUsd} disabled={busy} onChange={(e) => setDraft({ ...draft, dailyWarningUsd: e.target.value })} />
+                </label>
+              </div>
+            </details>
             <div className="admin-actions">
               <button className="primary-action" type="submit" disabled={busy}>{busy ? "Saving…" : "Save monitor settings"}</button>
               <button className="secondary-action" type="button" disabled={busy || !status.effectiveEnabled} onClick={run}>Run AI search now</button>
@@ -124,12 +159,12 @@ export function AIMonitorSettings({ client, onRunComplete }) {
           {!status.runs?.length ? <p>No AI searches have been run.</p> : <ul className="monitor-runs">
             {status.runs.map((entry) => <li key={entry.id}>
               <strong>{entry.status}</strong> · {readableDate(entry.startedAt)}
-              <p>{entry.candidatesCreated ?? 0} reports added for review · {entry.webSearchCalls ?? 0} web tool calls · {entry.inputTokens ?? 0} input / {entry.outputTokens ?? 0} output tokens</p>
+              <p>{entry.candidatesCreated ?? 0} added · {entry.skippedLeads ?? 0} screened out before verification · {entry.webSearchCalls ?? 0} web calls · {entry.inputTokens ?? 0} input / {entry.outputTokens ?? 0} output tokens · {usd(entry.estimatedUsd)}</p>
               {entry.error && <p className="inline-error">{entry.error}</p>}
             </li>)}
           </ul>}
         </>
       )}
-    </details>
+    </section>
   );
 }
