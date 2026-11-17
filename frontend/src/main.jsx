@@ -14,6 +14,6 @@ const adminRoute = /^\/admin(?:\/|$)/.test(window.location.pathname)
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    {adminRoute ? <React.Suspense fallback={<main className="workspace-loading" role="status">Opening MCAD workspace…</main>}><AdminWorkspace /></React.Suspense> : <App />}
+    {adminRoute ? <React.Suspense fallback={<main className="workspace-loading mcad-theme" role="status">Opening MCAD workspace…</main>}><AdminWorkspace /></React.Suspense> : <App />}
   </React.StrictMode>,
 );

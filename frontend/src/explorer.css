@@ -1,4 +1,4 @@
-.explorer {
+.mcad-theme {
   --paper: #f1f5f6;
   --surface: #fff;
   --ink: #132e3b;
@@ -6,6 +6,12 @@
   --line: #d9e4e7;
   --teal: #17615e;
   --pale: #eef7f5;
+  --field-bg: #f7fafb;
+  --field-border: #c9d9de;
+  --panel-radius: 14px;
+  --focus: #0e7975;
+}
+.explorer {
   position: fixed;
   inset: 0;
   overflow: auto;
@@ -14,7 +20,7 @@
   background: var(--paper);
 }
 .explorer :where(button, input, select, a):focus-visible {
-  outline: 2px solid #0e7975;
+  outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 .explorer :where(button, input, select) {
@@ -148,7 +154,7 @@
   background: transparent;
   font-size: 14px;
 }
-.explorer-modes button[aria-pressed="true"] {
+.explorer-modes button:is([aria-pressed="true"], [aria-current="page"]) {
   color: #123441;
   background: #fff;
   box-shadow: 0 1px 4px #12333122;
@@ -167,7 +173,7 @@
   padding: 16px 18px 0;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--panel-radius);
   box-shadow: 0 4px 14px #233b4909;
   margin-bottom: 14px;
 }
@@ -199,12 +205,12 @@
   align-items: center;
   gap: 9px;
   padding: 0 11px;
-  border: 1px solid #c9d9de;
+  border: 1px solid var(--field-border);
   border-radius: 8px;
-  background: #f7fafb;
+  background: var(--field-bg);
 }
 .explorer-search-field:focus-within {
-  outline: 2px solid #0e7975;
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 .explorer-search-field img,
@@ -232,9 +238,9 @@
   min-width: 0;
   padding: 0 9px;
   height: 43px;
-  border: 1px solid #c9d9de;
+  border: 1px solid var(--field-border);
   border-radius: 8px;
-  background: #f7fafb;
+  background: var(--field-bg);
   font-size: 14px;
   text-overflow: ellipsis;
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import MaritimeMap from "./components/MaritimeMap.jsx";
 import { IncidentDetails } from "./components/IncidentDetails.jsx";
+import { MCADHeader } from "./components/MCADHeader.jsx";
 import { fetchIncident, hasCoordinates } from "./data/incidents.js";
 import {
   countryRoles,
@@ -298,20 +299,12 @@ export function App() {
   );
 
   return (
-    <div className="explorer">
+    <div className="explorer mcad-theme">
       <a href="#incident-search" className="explorer-skip">Skip to incident search</a>
-      <div role="banner" className="explorer-header">
-        <div className="explorer-header-inner">
-          <a className="explorer-brand" href="/" aria-label="MCAD home">
-            <span aria-hidden="true" className="explorer-brand-name">MCAD</span>
-            <span className="explorer-brand-caption">Maritime Cyber Attack Database</span>
-          </a>
-          <nav className="explorer-header-nav" aria-label="Main navigation">
-            <button type="button" onClick={() => setInfoOpen(true)}>About</button>
-            <a href={adminUrl}>Admin workspace <span aria-hidden="true">↗</span></a>
-          </nav>
-        </div>
-      </div>
+      <MCADHeader>
+        <button type="button" onClick={() => setInfoOpen(true)}>About</button>
+        <a href={adminUrl}>Admin workspace <span aria-hidden="true">↗</span></a>
+      </MCADHeader>
 
       <main className="explorer-body">
         <div className="explorer-intro">

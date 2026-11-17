@@ -4,25 +4,19 @@ import { AdminPanel } from "./AdminPanel.jsx";
 import { AIMonitorSettings } from "./AIMonitorSettings.jsx";
 import { TelegramSettings } from "./TelegramSettings.jsx";
 import { LearningPanel } from "./LearningPanel.jsx";
+import { MCADHeader } from "./MCADHeader.jsx";
 import "./admin-workspace.css";
 
 const sections = [
-  ["overview", "Overview", "Track the archive, incoming reports and monitoring at a glance."],
-  ["review", "Review queue", "Check sources, resolve uncertainties and publish verified incidents."],
-  ["monitor", "Discovery", "Manage search coverage, run limits, usage and alerts."],
-  ["learning", "Feedback & prompts", "Review Telegram feedback and evaluate changes before they go live."],
-  ["team", "Team access", "Invite reviewers and manage workspace permissions."],
+  ["overview", "Overview"],
+  ["review", "Review queue"],
+  ["monitor", "Discovery"],
+  ["learning", "Feedback & prompts"],
+  ["team", "Team access"],
 ];
 
 const formatDate = (value) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 const explorerUrl = import.meta.env.VITE_PUBLIC_ORIGIN || "/";
-
-function Brand() {
-  return <div className="workspace-brand">
-    <img src="/assets/img/logo.png" alt="" />
-    <span><strong>MCAD</strong><small>Operations workspace</small></span>
-  </div>;
-}
 
 function SignIn({ client, inviteToken, loading, onSignedIn, sessionError, retry }) {
   const [email, emailChange] = useState("");
@@ -41,21 +35,16 @@ function SignIn({ client, inviteToken, loading, onSignedIn, sessionError, retry 
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
-  return <main className="workspace-auth">
-    <div className="workspace-auth-intro">
-      <Brand />
-      <div>
-        <p className="workspace-eyebrow">MARITIME CYBER ATTACK DATABASE</p>
-        <h1>Clarity on the<br />maritime picture.</h1>
-        <p>Review reports, manage discovery and keep the incident archive grounded in evidence.</p>
-      </div>
-      <a className="workspace-back" href={explorerUrl}>← Incident explorer</a>
-    </div>
-    <div className="workspace-auth-side">
-      <div className="workspace-card workspace-signin">
-        <p className="workspace-eyebrow">{inviteToken ? "TEAM INVITATION" : "PRIVATE WORKSPACE"}</p>
-        <h2>{inviteToken ? "Join the MCAD team" : "Welcome back"}</h2>
-        <p className="workspace-muted">{inviteToken ? "Set a password for the account in your invitation." : "Sign in with your MCAD account."}</p>
+  return <div className="workspace mcad-theme">
+    <MCADHeader homeUrl={explorerUrl}>
+      <a href={explorerUrl}>Incident explorer</a>
+    </MCADHeader>
+    <main className="explorer-body workspace-main workspace-auth">
+      <section className="workspace-card workspace-signin" aria-labelledby="workspace-signin-title">
+        <div className="explorer-intro">
+          <h1 id="workspace-signin-title">{inviteToken ? "Join the MCAD team" : "Sign in to MCAD"}</h1>
+        </div>
+        {inviteToken && <p className="workspace-muted">Set a password for the account in your invitation.</p>}
         {loading ? <p role="status">Checking your session…</p> : <>
           <form className="workspace-stack" onSubmit={submit}>
             {!inviteToken && <label>Email<input autoComplete="username" type="email" maxLength={254} required value={email} onChange={(e) => emailChange(e.target.value)} /></label>}
@@ -65,11 +54,11 @@ function SignIn({ client, inviteToken, loading, onSignedIn, sessionError, retry 
           </form>
           {(error || sessionError) && <p className="inline-error" role="alert">{error || sessionError}</p>}
           {sessionError && <button className="secondary-action" type="button" onClick={retry}>Retry connection</button>}
-          {inviteToken ? <p><a href="/admin">Back to sign in</a></p> : <p className="workspace-muted workspace-signin-foot">New here? Ask your MCAD administrator for an invitation.</p>}
+          <p className="workspace-muted workspace-signin-foot">{inviteToken ? <a href="/admin">Back to sign in</a> : "Need an account? Ask your MCAD administrator for an invitation."}</p>
         </>}
-      </div>
-    </div>
-  </main>;
+      </section>
+    </main>
+  </div>;
 }
 
 function Team({ client, user }) {
@@ -168,17 +157,19 @@ function Overview({ client, admin, readSection }) {
   }, [client, admin]);
   return <div className="workspace-stack">
     {error && <p className="inline-error" role="alert">{error}</p>}
-    <div className="workspace-stats">
-      {[
-        ["Published incidents", health?.incidents.total, "Records in the public archive"],
-        ["Mapped records", health?.incidents.mapped, "With an attributed location"],
-        ["Awaiting review", health?.feed.pendingCandidates, "Incoming reports to check"],
-        ...(admin ? [["AI discovery", status ? status.effectiveEnabled ? "Active" : "Paused" : null, status?.effectiveEnabled ? "Scheduled searches enabled" : "No search is scheduled"]] : []),
-      ].map(([label, value, note]) => <div className="workspace-card workspace-stat" key={label}><p>{label}</p><strong>{value ?? "—"}</strong><small>{note}</small></div>)}
-    </div>
-    <section className="workspace-card workspace-next">
-      <div><p className="workspace-eyebrow">EDITORIAL DESK</p><h2>Reports need a human decision.</h2><p className="workspace-muted">Check the evidence, correct the record and publish once the facts are verified.</p></div>
-      <button className="primary-action" type="button" onClick={() => readSection("review")}>Open review queue</button>
+    <section className="workspace-card workspace-overview" aria-labelledby="archive-status">
+      <div className="workspace-section-heading">
+        <h2 id="archive-status">Archive and review</h2>
+        <button className="primary-action" type="button" onClick={() => readSection("review")}>Open review queue</button>
+      </div>
+      <dl className="workspace-stats workspace-metrics">
+        {[
+          ["Published incidents", health?.incidents.total],
+          ["Mapped records", health?.incidents.mapped],
+          ["Awaiting review", health?.feed.pendingCandidates],
+          ...(admin ? [["AI discovery", status ? status.effectiveEnabled ? "Active" : "Paused" : null]] : []),
+        ].map(([label, value]) => <div className="workspace-stat" key={label}><dt>{label}</dt><dd>{value ?? "—"}</dd></div>)}
+      </dl>
     </section>
   </div>;
 }
@@ -245,29 +236,25 @@ export function AdminWorkspace() {
   const admin = user.role === "admin";
   const available = admin ? sections : sections.slice(0, 2);
   const selected = available.find(([key]) => key === section) ?? available[0];
-  return <div className="workspace">
-    <aside className="workspace-sidebar">
-      <Brand />
-      <nav aria-label="Administration">{available.map(([key, label], index) => <button type="button" key={key} aria-current={key === selected[0] ? "page" : undefined} onClick={() => setSection(key)}>
-        <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>{label}
-      </button>)}</nav>
-      <div className="workspace-profile">
-        <small>{admin ? "Administrator" : "Reviewer"}</small><strong>{user.email}</strong>
-        <button type="button" disabled={signingOut} onClick={async () => {
-          setSigningOut(true);
-          setError("");
-          try { await client.logout(); setUser(null); }
-          catch (failure) { setError(failure.message); }
-          finally { setSigningOut(false); }
-        }}>{signingOut ? "Signing out…" : "Sign out"}</button>
+  return <div className="workspace mcad-theme">
+    <MCADHeader homeUrl={explorerUrl}>
+      <a href={explorerUrl}>Incident explorer</a>
+      <button type="button" disabled={signingOut} onClick={async () => {
+        setSigningOut(true);
+        setError("");
+        try { await client.logout(); setUser(null); }
+        catch (failure) { setError(failure.message); }
+        finally { setSigningOut(false); }
+      }}>{signingOut ? "Signing out…" : "Sign out"}</button>
+    </MCADHeader>
+    <main className="explorer-body workspace-main">
+      <div className="explorer-intro workspace-title">
+        <h1>{selected[0] === "overview" ? "Administration" : selected[1]}</h1>
+        <p className="workspace-profile"><strong>{user.email}</strong><span>{admin ? "Administrator" : "Reviewer"}</span></p>
       </div>
-    </aside>
-    <main className="workspace-main">
-      <div className="workspace-top"><span>MCAD / Operations</span><a href={explorerUrl}>Incident explorer ↗</a></div>
-      <div className="workspace-header">
-        <p className="workspace-eyebrow">MARITIME INTELLIGENCE</p>
-        <h1>{selected[1]}</h1><p>{selected[2]}</p>
-      </div>
+      <nav className="explorer-modes workspace-nav" aria-label="Administration">
+        {available.map(([key, label]) => <button type="button" key={key} aria-current={key === selected[0] ? "page" : undefined} onClick={() => setSection(key)}>{label}</button>)}
+      </nav>
       {error && <p className="inline-error" role="alert">{error}</p>}
       {selected[0] === "overview" && <Overview client={client} admin={admin} readSection={setSection} />}
       {selected[0] === "review" && <AdminPanel client={client} canCreate={admin} />}

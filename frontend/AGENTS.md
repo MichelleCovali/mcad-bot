@@ -11,3 +11,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 Use the private MCAD workbook's structure for incident data. Preserve the current Telegram message format. AI search is prepared but must remain disabled until the user explicitly requests activation; opening settings and saving a paused schedule must not run a search.
 
 Keep incident type and country filters visible on both the map and list. Both views use the same search and filter selections.
+
+Make the administration and sign-in pages look like part of MCAD. Reuse the incident explorer's masthead, typography, light surfaces, controls and colors.
