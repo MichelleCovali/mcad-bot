@@ -34,6 +34,8 @@ import base64
 import hashlib
 import hmac
 import time
+import json
+import secrets
 from urllib.parse import urlsplit
 
 from .service import normalize_payload, safe_url
@@ -329,6 +331,89 @@ def approval_review_message(candidate, source_items: list[dict]) -> str:
     lines.extend(["", "Confirm ONLY after opening the source links and checking the title, details and categories.",
                   "Confirm makes this record PUBLIC. Use Cancel or the web admin panel to edit details."])
     return "\n".join(lines)[:4096]
+
+
+# Narrow, explicit review choices. Other classifications must be edited in the
+# web admin panel. This stage never publishes a candidate automatically.
+CLASSIFICATION_CHOICES = {
+    "v": {"v": "Vessel", "p": "Port", "o": "Offshore infrastructure",
+          "u": "Undersea infrastructure", "i": "Other maritime infrastructure"},
+    "m": {"a": "AIS spoofing", "g": "GPS spoofing", "j": "GPS jamming",
+          "r": "Ransomware", "o": "Other / undetermined"},
+}
+CLASSIFICATION_FIELDS = {"v": "victimType", "m": "method"}
+
+
+def classification_keyboard(candidate_id: str, original_markup: dict | None = None, *, enabled=False) -> dict | None:
+    """Replace the preview correction button only when explicitly enabled."""
+    markup = original_markup if original_markup is not None else preview_keyboard(candidate_id)
+    if markup is None:
+        return None
+    if enabled:
+        markup["inline_keyboard"][1][0] = {
+            "text": "Correct classification",
+            "callback_data": f"mcad:c:start:{candidate_id}",
+        }
+    return markup
+
+
+def classification_fields_keyboard(candidate_id: str) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "Maritime category", "callback_data": f"mcad:c:field:v:{candidate_id}"}],
+        [{"text": "Incident method", "callback_data": f"mcad:c:field:m:{candidate_id}"}],
+        [{"text": "Cancel", "callback_data": f"mcad:c:cancel:{candidate_id}"}],
+    ]}
+
+
+def classification_choices_keyboard(candidate_id: str, field_key: str) -> dict:
+    choices = CLASSIFICATION_CHOICES[field_key]
+    rows = [[{"text": label, "callback_data": f"mcad:c:pick:{field_key}{key}:{candidate_id}"}]
+            for key, label in choices.items()]
+    rows.append([{"text": "Cancel", "callback_data": f"mcad:c:cancel:{candidate_id}"}])
+    return {"inline_keyboard": rows}
+
+
+def classification_confirmation_keyboard(candidate_id: str, nonce: str) -> dict:
+    return {"inline_keyboard": [
+        [{"text": "Save correction (do not publish)",
+          "callback_data": f"mcad:c:save:{nonce}:{candidate_id}"}],
+        [{"text": "Cancel", "callback_data": f"mcad:c:cancel:{candidate_id}"}],
+    ]}
+
+
+def parse_classification_action(data: object) -> tuple[str, str | None, str] | None:
+    if not isinstance(data, str) or len(data.encode("utf-8")) > 64:
+        return None
+    parts = data.split(":")
+    if len(parts) == 4 and parts[:2] == ["mcad", "c"] and parts[2] in {"start", "cancel"}:
+        stage, selection, candidate_id = parts[2], None, parts[3]
+    elif len(parts) == 5 and parts[:3] == ["mcad", "c", "field"] and parts[3] in CLASSIFICATION_FIELDS:
+        stage, selection, candidate_id = "field", parts[3], parts[4]
+    elif len(parts) == 5 and parts[:3] == ["mcad", "c", "pick"] and len(parts[3]) == 2 and parts[3][0] in CLASSIFICATION_CHOICES and parts[3][1] in CLASSIFICATION_CHOICES[parts[3][0]]:
+        stage, selection, candidate_id = "pick", parts[3], parts[4]
+    elif len(parts) == 5 and parts[:3] == ["mcad", "c", "save"] and len(parts[3]) == 8 and all(ch.isalnum() or ch in "-_" for ch in parts[3]):
+        stage, selection, candidate_id = "save", parts[3], parts[4]
+    else:
+        return None
+    if preview_keyboard(candidate_id) is None:
+        return None
+    return stage, selection, candidate_id
+
+
+def classification_session_key(reviewer_id: int) -> str:
+    if type(reviewer_id) is not int or reviewer_id <= 0:
+        raise ValueError("Invalid Telegram reviewer")
+    return f"tg_classify:{reviewer_id}"
+
+
+def new_classification_nonce() -> str:
+    return secrets.token_urlsafe(6)
+
+
+def approval_fields_fingerprint(candidate) -> str:
+    """Bind an approval preview to the candidate's current proposed fields."""
+    data = json.dumps(candidate.proposed_fields or {}, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
 def approval_session_key(candidate_id: str, reviewer_id: int) -> str:

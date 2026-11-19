@@ -27,7 +27,12 @@ from .telegram_review import (CallbackReply, REJECTION_REASONS, is_authorized_re
                               verified_evidence_sources, telegram_approval_payload, approval_review_message,
                               approval_session_key,
                               rejection_confirmation_keyboard, rejection_reason_keyboard,
-                              rejection_note_session_key, normalize_rejection_note)
+                              rejection_note_session_key, normalize_rejection_note,
+                              classification_session_key, parse_classification_action,
+                              classification_fields_keyboard, classification_choices_keyboard,
+                              classification_confirmation_keyboard, CLASSIFICATION_CHOICES,
+                              CLASSIFICATION_FIELDS, new_classification_nonce,
+                              approval_fields_fingerprint)
 
 
 logger = logging.getLogger("mcad.workers")
@@ -217,7 +222,7 @@ HELP = "MCAD incident alerts\n\n/subscribe — receive new source-checked AI rep
 def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(),
                    review_buttons_enabled=False, rejection_actions_enabled=False,
                    approval_actions_enabled=False, approval_secret="",
-                   rejection_notes_enabled=False):
+                   rejection_notes_enabled=False, classification_actions_enabled=False):
     """Persist command effects and offset before replying; replayed updates are silent."""
     update_id = update_data.get("update_id")
     if not isinstance(update_id, int) or isinstance(update_id, bool):
@@ -281,6 +286,8 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 ).with_for_update())
                 if candidate is None or candidate.status != "pending":
                     return CallbackReply(callback_id, "This report is no longer awaiting review.")
+                if stage == "confirm" and approval_state.value.get("fieldsFingerprint") != approval_fields_fingerprint(candidate):
+                    return CallbackReply(callback_id, "The report details changed. Review the latest details before confirming.")
                 approved_payload = telegram_approval_payload(candidate, reviewer_id)
                 if approved_payload is None:
                     return CallbackReply(callback_id, "This report needs detailed verification in the web admin panel.")
@@ -289,9 +296,11 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                     keyboard = approval_confirmation_keyboard(candidate_id, reviewer_id, approval_secret)
                     confirm_data = keyboard["inline_keyboard"][0][0]["callback_data"]
                     if approval_state is None:
-                        session.add(WorkerState(name=state_key, value={"callbackData": confirm_data}))
+                        session.add(WorkerState(name=state_key, value={"callbackData": confirm_data,
+                                                                        "fieldsFingerprint": approval_fields_fingerprint(candidate)}))
                     else:
-                        approval_state.value = {"callbackData": confirm_data}
+                        approval_state.value = {"callbackData": confirm_data,
+                                                "fieldsFingerprint": approval_fields_fingerprint(candidate)}
                     return CallbackReply(callback_id, "Check the sources before confirming publication.",
                                          chat_id, approval_review_message(candidate, source_items), keyboard)
                 # A stale relationship/matching decision is not permission to
@@ -329,6 +338,96 @@ def process_update(factory, update_data, base_url="", *, reviewer_ids=frozenset(
                 candidate.evidence = evidence
                 session.delete(approval_state)
                 return CallbackReply(callback_id, "Published to MCAD. Incident ID: " + incident.id)
+            classification = parse_classification_action(callback.get("data"))
+            if classification is not None:
+                if not classification_actions_enabled:
+                    return CallbackReply(callback_id, "Classification corrections are disabled. Use the MCAD admin panel.")
+                stage, selection, candidate_id = classification
+                reviewer_id = callback["from"]["id"]
+                chat_id = str(reviewer_id)
+                state_key = classification_session_key(reviewer_id)
+                draft_row = session.get(WorkerState, state_key)
+                if stage == "cancel":
+                    if draft_row is not None:
+                        session.delete(draft_row)
+                    return CallbackReply(callback_id, "Classification correction cancelled; nothing changed.")
+                delivered = session.scalar(select(CandidateDelivery.id).join(
+                    CandidateNotification, CandidateDelivery.event_id == CandidateNotification.id
+                ).join(Subscriber, CandidateDelivery.chat_id == Subscriber.chat_id).where(
+                    CandidateNotification.candidate_id == candidate_id,
+                    CandidateDelivery.chat_id == chat_id,
+                    CandidateDelivery.status == "sent", Subscriber.active.is_(True),
+                ).limit(1))
+                if not delivered:
+                    return CallbackReply(callback_id, "This report was not delivered to your private subscription.")
+                if stage == "save" and session.bind.dialect.name == "sqlite":
+                    session.execute(update(Candidate).where(Candidate.id == candidate_id).values(status=Candidate.status))
+                candidate = session.scalar(select(Candidate).where(Candidate.id == candidate_id).with_for_update())
+                if (candidate is None or candidate.status != "pending" or candidate.baseline or
+                    candidate.origin != "ai" or candidate.verification_status != "supported" or
+                    candidate.relationship_type not in {"unclassified", "new_incident"} or
+                    candidate.related_incident_id is not None):
+                    return CallbackReply(callback_id, "This candidate needs review in the web admin panel.")
+                if stage == "start":
+                    value = {"candidateId": candidate_id, "stage": "select", "expiresAt": time.time() + 900}
+                    if draft_row is None:
+                        session.add(WorkerState(name=state_key, value=value))
+                    else:
+                        draft_row.value = value
+                    return CallbackReply(callback_id, "Select a field to correct.", chat_id,
+                                         "Choose the classification field you want to correct. Nothing is published.",
+                                         classification_fields_keyboard(candidate_id))
+                draft = dict(draft_row.value or {}) if draft_row else {}
+                if (draft.get("candidateId") != candidate_id or
+                    not isinstance(draft.get("expiresAt"), (int, float)) or
+                    draft["expiresAt"] < time.time()):
+                    if draft_row is not None:
+                        session.delete(draft_row)
+                    return CallbackReply(callback_id, "Correction expired. Start again from the notification.")
+                if stage == "field":
+                    if draft.get("stage") not in {"select", "choices"}:
+                        return CallbackReply(callback_id, "Start the correction again.")
+                    draft_row.value = {**draft, "stage": "choices", "fieldKey": selection}
+                    return CallbackReply(callback_id, "Choose a correction.", chat_id,
+                                         "Select the corrected value (other categories can be edited on the website).",
+                                         classification_choices_keyboard(candidate_id, selection))
+                if stage == "pick":
+                    field_key, choice_key = selection
+                    if draft.get("stage") != "choices" or draft.get("fieldKey") != field_key:
+                        return CallbackReply(callback_id, "Choose a field before selecting its value.")
+                    field = CLASSIFICATION_FIELDS[field_key]
+                    original = (candidate.proposed_fields or {}).get(field)
+                    replacement = CLASSIFICATION_CHOICES[field_key][choice_key]
+                    if original == replacement:
+                        return CallbackReply(callback_id, "This value is already selected. Choose a different value.")
+                    nonce = new_classification_nonce()
+                    draft_row.value = {**draft, "stage": "confirm", "field": field,
+                                       "oldValue": original, "newValue": replacement,
+                                       "nonce": nonce, "expiresAt": time.time() + 900}
+                    text = f"Confirm {field}: {str(original or 'not specified')[:120]} -> {replacement}. This does NOT publish the incident."
+                    return CallbackReply(callback_id, "Review the proposed correction.", chat_id, text,
+                                         classification_confirmation_keyboard(candidate_id, nonce))
+                if stage != "save" or draft.get("stage") != "confirm" or draft.get("nonce") != selection:
+                    return CallbackReply(callback_id, "Invalid or outdated confirmation. Start again.")
+                field = draft.get("field")
+                new_value = draft.get("newValue")
+                old_value = (candidate.proposed_fields or {}).get(field)
+                if (field not in CLASSIFICATION_FIELDS.values() or
+                    new_value not in CLASSIFICATION_CHOICES["v" if field == "victimType" else "m"].values() or
+                    old_value != draft.get("oldValue")):
+                    return CallbackReply(callback_id, "The classification changed. Review the current candidate again.")
+                proposed = dict(candidate.proposed_fields or {})
+                proposed[field] = new_value
+                candidate.proposed_fields = proposed
+                evidence = dict(candidate.evidence or {})
+                history = list(evidence.get("classificationReviews", []))
+                history.append({"source": "telegram", "reviewerId": chat_id,
+                                "reviewedAt": utcnow().isoformat() + "Z", "field": field,
+                                "previousValue": old_value, "newValue": new_value})
+                evidence["classificationReviews"] = history
+                candidate.evidence = evidence
+                session.delete(draft_row)
+                return CallbackReply(callback_id, "Classification saved. The candidate is still pending and NOT published.")
             rejection = parse_rejection_action(callback.get("data"))
             if rejection is not None:
                 if not rejection_actions_enabled:
@@ -596,7 +695,8 @@ class WorkerController:
                                               reviewer_ids=self.settings.telegram_reviewer_ids,
                                               review_buttons_enabled=self.settings.enable_telegram_review_buttons,
                                               rejection_actions_enabled=self.settings.enable_telegram_rejection_actions,
-                                              approval_actions_enabled=self.settings.enable_telegram_approval_actions)
+                                              approval_actions_enabled=self.settings.enable_telegram_approval_actions,
+                                              classification_actions_enabled=self.settings.enable_telegram_classification_actions)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -625,6 +725,7 @@ class WorkerController:
                     approval_actions_enabled=self.settings.enable_telegram_approval_actions,
                     approval_secret=self.settings.telegram_bot_token,
                     rejection_notes_enabled=self.settings.enable_telegram_rejection_notes,
+                    classification_actions_enabled=self.settings.enable_telegram_classification_actions,
                 )
                 if isinstance(reply, CallbackReply):
                     self.client.answer_callback(reply.callback_id, reply.text)
