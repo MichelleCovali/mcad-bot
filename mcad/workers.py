@@ -132,6 +132,15 @@ class TelegramClient:
         except requests.RequestException:
             pass
 
+    def edit_review_markup(self, chat_id, message_id, markup):
+        """Change only the controls on the delivered review message, not its content."""
+        try:
+            requests.post(f"https://api.telegram.org/bot{self.token}/editMessageReplyMarkup",
+                json={"chat_id": chat_id, "message_id": int(message_id),
+                      "reply_markup": markup}, timeout=10)
+        except (requests.RequestException, ValueError):
+            pass
+
     def get_updates(self, offset):
         try:
             response = requests.get(f"https://api.telegram.org/bot{self.token}/getUpdates", params={"offset": offset, "timeout": 25, "allowed_updates": '["message","callback_query"]'}, timeout=35)
@@ -336,7 +345,8 @@ class WorkerController:
                     if not sent:
                         review_chat = self.settings.telegram_review_chat_id if self.settings.telegram_review_enabled else ""
                         deliver_candidate_one(self.factory, self.client, self.settings.public_base_url, self.owner,
-                                              message_format=self.settings.telegram_message_format, review_chat_id=review_chat)
+                                              message_format=self.settings.telegram_message_format, review_chat_id=review_chat,
+                                              classification_enabled=self.settings.enable_telegram_classification_actions)
             except Exception:
                 logger.warning("MCAD delivery temporarily unavailable; retrying.")
             self.stopped.wait(1.05)
@@ -360,6 +370,8 @@ class WorkerController:
                 reply = process_update(self.factory, item, self.settings.public_base_url, settings=self.settings)
                 if isinstance(reply, CallbackAnswer):
                     self.client.answer_callback(reply.query_id, reply.text)
+                    if reply.markup is not None and reply.chat_id and reply.message_id:
+                        self.client.edit_review_markup(reply.chat_id, reply.message_id, reply.markup)
                 elif reply:
                     self.client.send(*reply)
                     self.stopped.wait(1.05)

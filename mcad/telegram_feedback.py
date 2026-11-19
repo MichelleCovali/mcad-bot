@@ -48,6 +48,11 @@ class TelegramFeedback(Base):
 class CallbackAnswer:
     query_id: str
     text: str
+    # A moderation menu can replace the keyboard of the exact delivered draft.
+    # None preserves existing answerCallbackQuery-only behavior.
+    chat_id: str | None = None
+    message_id: str | None = None
+    markup: dict | None = None
 
 
 def feedback_markup(delivery_kind, delivery_id):

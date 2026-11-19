@@ -1,18 +1,33 @@
 """Moderate the specific draft delivered to the configured Telegram review chat."""
 import re
+import secrets
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from .models import Candidate, CandidateDelivery, CandidateNotification
+from .models import Candidate, CandidateDelivery, CandidateNotification, WorkerState, utcnow
 from .service import safe_url
 from .telegram_feedback import CallbackAnswer
 
 
 REVIEW_CALLBACK_PREFIX = "mcad:review:"
-REVIEW_CALLBACK = re.compile(r"mcad:review:([0-9a-f-]{36}):(accept|update|reject)\Z")
+REVIEW_CALLBACK = re.compile(
+    r"mcad:review:([0-9a-f-]{36}):(accept|update|reject|classify|cv|cm|[vm][a-z]|save:[A-Za-z0-9_-]{8}|cancel)\Z"
+)
 MAX_SOURCE_LINK_UNITS = 800
+
+# Deliberately small, client-reviewable choices. More specific classifications
+# require the web editor; Telegram must never accept arbitrary callback text.
+CLASSIFICATION_FIELDS = {"v": "victimType", "m": "method"}
+CLASSIFICATION_CHOICES = {
+    "v": {"v": "Vessel", "p": "Port", "o": "Offshore infrastructure",
+          "u": "Undersea infrastructure", "i": "Other maritime infrastructure"},
+    "m": {"a": "AIS spoofing", "g": "GPS spoofing", "j": "GPS jamming",
+          "r": "Ransomware", "o": "Other / undetermined"},
+}
+CLASSIFICATION_REVIEW_MINUTES = 15
 
 
 def _display(value, max_units):
@@ -54,7 +69,29 @@ def _visible_corroboration(candidate):
     return telegram_corroborating_urls(candidate, url_filter=_fits_source_link)
 
 
-def review_notification(candidate, delivery_id, base_url="", incident_title=None):
+def _classification_available(candidate):
+    evidence = candidate.evidence or {}
+    return (candidate.status == "pending" and candidate.origin == "ai"
+            and candidate.verification_status == "supported" and not candidate.baseline
+            and not evidence.get("suggestedIncidentId") and not evidence.get("materialUpdate"))
+
+
+def _keyboard(delivery_id, rows):
+    return {"inline_keyboard": [[{"text": label,
+                                  "callback_data": f"{REVIEW_CALLBACK_PREFIX}{delivery_id}:{action}"}]
+                                 for label, action in rows]}
+
+
+def _menu_reply(query_id, chat_id, message_id, text, markup):
+    return CallbackAnswer(query_id, text, chat_id, message_id, markup)
+
+
+def _classification_state_key(reviewer_id):
+    return f"tg_classify:{reviewer_id}"
+
+
+def review_notification(candidate, delivery_id, base_url="", incident_title=None,
+                        *, classification_enabled=False):
     evidence = candidate.evidence or {}
     fields = candidate.proposed_fields or {}
     update = evidence.get("materialUpdate") or {}
@@ -84,6 +121,9 @@ def review_notification(candidate, delivery_id, base_url="", incident_title=None
         actions.append({"text": caption, "callback_data": f"{REVIEW_CALLBACK_PREFIX}{delivery_id}:{action}"})
     actions.append({"text": "Reject", "callback_data": f"{REVIEW_CALLBACK_PREFIX}{delivery_id}:reject"})
     rows = [actions]
+    if classification_enabled and _classification_available(candidate):
+        rows.append([{"text": "Correct classification",
+                      "callback_data": f"{REVIEW_CALLBACK_PREFIX}{delivery_id}:classify"}])
     url = safe_url(base_url)
     if url:
         candidate_url = f"{url.rstrip('/')}/admin?candidate={quote(str(candidate.id), safe='')}"
@@ -142,6 +182,90 @@ def record_review_callback(session, callback, settings):
         return unavailable
     if candidate.status != "pending":
         return CallbackAnswer(query_id, "This draft has already been reviewed.")
+    if action not in {"accept", "update", "reject"}:
+        if not getattr(settings, "enable_telegram_classification_actions", False) or not _classification_available(candidate):
+            return unavailable
+        reviewer_id = _telegram_id((callback.get("from") or {}).get("id"), positive=True)
+        state = session.get(WorkerState, _classification_state_key(reviewer_id))
+        if action == "classify":
+            # Going back to the first menu abandons a previous confirmation.
+            if state and state.value.get("deliveryId") == delivery_id:
+                session.delete(state)
+            return _menu_reply(query_id, chat_id, message_id,
+                "Choose a field. Nothing is published.",
+                _keyboard(delivery_id, [("Maritime category", "cv"), ("Incident method", "cm"),
+                                        ("Cancel", "cancel")]))
+        if action in {"cv", "cm"}:
+            field_key = action[1]
+            options = [(value, field_key + code) for code, value in CLASSIFICATION_CHOICES[field_key].items()]
+            return _menu_reply(query_id, chat_id, message_id,
+                "Choose the corrected classification.",
+                _keyboard(delivery_id, [*options, ("Back", "classify"), ("Cancel", "cancel")]))
+        if action == "cancel":
+            if state and state.value.get("deliveryId") == delivery_id:
+                session.delete(state)
+            markup = review_notification(candidate, delivery_id, settings.public_base_url,
+                classification_enabled=True)[1]
+            return _menu_reply(query_id, chat_id, message_id, "Correction cancelled.", markup)
+        if len(action) == 2 and action[0] in CLASSIFICATION_CHOICES:
+            field_key, choice_key = action
+            choice = CLASSIFICATION_CHOICES[field_key].get(choice_key)
+            if not choice:
+                return unavailable
+            field = CLASSIFICATION_FIELDS[field_key]
+            previous = (candidate.proposed_fields or {}).get(field)
+            if previous == choice:
+                return CallbackAnswer(query_id, "This classification is already selected.")
+            nonce = secrets.token_urlsafe(6)
+            value = {"candidateId": candidate.id, "deliveryId": delivery_id,
+                     "chatId": chat_id, "field": field, "oldValue": previous,
+                     "newValue": choice, "nonce": nonce,
+                     "expiresAt": (utcnow() + timedelta(minutes=CLASSIFICATION_REVIEW_MINUTES)).isoformat()}
+            if state:
+                state.value = value
+            else:
+                session.add(WorkerState(name=_classification_state_key(reviewer_id), value=value))
+            return _menu_reply(query_id, chat_id, message_id,
+                f"Confirm {field}: {_display(previous or '(unset)', 60)} → {_display(choice, 60)}. This will not publish.",
+                _keyboard(delivery_id, [("Save correction (no publication)", f"save:{nonce}"),
+                                        ("Cancel", "cancel")]))
+        if action.startswith("save:"):
+            draft = state.value if state else {}
+            if (draft.get("candidateId") != candidate.id or draft.get("deliveryId") != delivery_id
+                    or draft.get("chatId") != chat_id or draft.get("nonce") != action[5:]):
+                return CallbackAnswer(query_id, "This correction confirmation is no longer valid.")
+            try:
+                expires = datetime.fromisoformat(draft["expiresAt"])
+            except (KeyError, TypeError, ValueError):
+                return CallbackAnswer(query_id, "This correction confirmation is invalid.")
+            if expires <= utcnow():
+                session.delete(state)
+                return CallbackAnswer(query_id, "Correction expired. Start again.")
+            # Lock the same candidate row as the normal publishing pathway.
+            candidate = session.scalar(select(Candidate).where(Candidate.id == candidate.id)
+                                       .with_for_update().execution_options(populate_existing=True))
+            if not candidate or not _classification_available(candidate):
+                return CallbackAnswer(query_id, "This report can no longer be corrected.")
+            field, old_value, new_value = draft.get("field"), draft.get("oldValue"), draft.get("newValue")
+            key = next((key for key, name in CLASSIFICATION_FIELDS.items() if name == field), None)
+            if (not key or new_value not in CLASSIFICATION_CHOICES[key].values()
+                    or (candidate.proposed_fields or {}).get(field) != old_value):
+                session.delete(state)
+                return CallbackAnswer(query_id, "The classification changed. Review the current report again.")
+            candidate.proposed_fields = {**(candidate.proposed_fields or {}), field: new_value}
+            evidence = dict(candidate.evidence or {})
+            history = evidence.get("classificationReviews")
+            history = list(history) if isinstance(history, list) else []
+            history.append({"field": field, "oldValue": old_value, "newValue": new_value,
+                            "reviewerTelegramId": reviewer_id, "reviewedAt": utcnow().isoformat() + "Z"})
+            evidence["classificationReviews"] = history
+            candidate.evidence = evidence
+            session.delete(state)
+            markup = review_notification(candidate, delivery_id, settings.public_base_url,
+                classification_enabled=True)[1]
+            return _menu_reply(query_id, chat_id, message_id,
+                "Classification saved. Report still pending; nothing published.", markup)
+        return unavailable
     if action == "reject":
         return CallbackAnswer(query_id, "Reply to this message with /reject followed by your explanation, for example /reject The report describes a drill, not an outage.")
 
