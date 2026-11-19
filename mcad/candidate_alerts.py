@@ -100,7 +100,8 @@ def candidate_notification_text(payload, base_url="", message_format="link"):
     return "\n".join(lines)[:4096]
 
 
-def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link", *, review_chat_id=""):
+def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, message_format="link", *,
+                          review_chat_id="", classification_enabled=False):
     if message_format not in {"link", "rich"}:
         raise ValueError("TELEGRAM_MESSAGE_FORMAT must be link or rich.")
     owner, now = owner or str(uuid4()), now or utcnow()
@@ -150,7 +151,8 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
 
             target_id = (candidate.evidence or {}).get("suggestedIncidentId")
             target = session.get(Incident, target_id) if target_id else None
-            text, markup = review_notification(candidate, delivery.id, base_url, target.title if target else None)
+            text, markup = review_notification(candidate, delivery.id, base_url,
+                target.title if target else None, classification_enabled=classification_enabled)
             result = client.send_with_review(delivery.chat_id, text, markup)
         else:
             result = send_notification(client, delivery.chat_id,
