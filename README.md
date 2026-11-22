@@ -14,6 +14,8 @@ queues a message for subscribed Telegram chats.
 - [AI monitor configuration and paused setup](docs/ai-monitor.md)
 - [Backend configuration and API](mcad/README.md)
 - [Frontend development](frontend/README.md)
+- [Project overview](docs/project-overview.md), [proposed constitution](docs/constitution.md), and [roadmap](docs/roadmap.md)
+- [Incident review specification draft](docs/specs/incident-review/spec.md)
 
 The Docker deployment uses PostgreSQL. Local development can use SQLite.
 RSS keyword matches require human review before publication. Location and date
