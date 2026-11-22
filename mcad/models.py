@@ -177,8 +177,26 @@ class Candidate(Base):
     relationship_reason: Mapped[str] = mapped_column(
         Text, default="", server_default=""
     )
+# Storage for an incident’s before-and-after history. Why: when a reviewer updates an existing incident, we need to preserve the earlier information. What improves: Changes can be traced to their supporting report and review reason.
+class IncidentRevision(Base):
+    __tablename__ = "incident_revisions"
 
-
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=uuid
+    )
+    incident_id: Mapped[str] = mapped_column(
+        ForeignKey("incidents.id"), index=True
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("candidates.id"), unique=True
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    before_snapshot: Mapped[dict] = mapped_column(JSON)
+    after_snapshot: Mapped[dict] = mapped_column(JSON)
+    evidence: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow
+    )
 
 class Subscriber(Base):
     __tablename__ = "subscribers"
