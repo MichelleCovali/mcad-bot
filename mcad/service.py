@@ -5,6 +5,7 @@ import re
 import hashlib
 from datetime import date, datetime
 from urllib.parse import urlsplit, urlunsplit
+from .models import Candidate, IncidentRevision
 
 from sqlalchemy import select, text
 
@@ -189,6 +190,108 @@ def create_publication_event(session, incident, reviewed_candidate_id=None):
             session.add(Delivery(event_id=event.id, chat_id=subscriber.chat_id))
     return event
 
+def apply_reviewed_incident_update(
+    session, candidate_id, incident_id, payload, reason,
+    expected_updated_at,
+):
+    """Apply an explicit reviewed patch within the caller's transaction."""
+    if (
+        not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason) > 2000
+    ):
+        raise ValueError("Provide an update reason of 1–2000 characters.")
+
+    candidate = session.scalar(
+        select(Candidate)
+        .where(Candidate.id == candidate_id)
+        .with_for_update()
+    )
+    if candidate is None or candidate.status != "pending":
+        raise ValueError("The candidate must exist and still be pending.")
+
+    if candidate.relationship_type not in {
+        "possible_update", "possible_duplicate"
+    }:
+        raise ValueError("This candidate is not awaiting relationship review.")
+
+    incident = session.scalar(
+        select(Incident)
+        .where(Incident.id == incident_id)
+        .with_for_update()
+    )
+    if incident is None or incident.status != "published":
+        raise ValueError("Choose an existing published incident.")
+
+    if expected_updated_at != incident.updated_at.isoformat():
+        raise ValueError(
+            "The incident changed since it was opened. "
+            "Reload it before applying this update."
+        )
+
+    values = normalize_payload(payload, existing=incident)
+
+    # These fields need their own dedicated workflows.
+    forbidden = {
+        "status", "external_id", "raw_fields", "source_url",
+        "qa", "reference_number",
+        "organisations", "actors", "locations",
+    }
+    if forbidden & set(values):
+        raise ValueError(
+            "This update includes protected fields: "
+            + ", ".join(sorted(forbidden & set(values)))
+        )
+
+    new_sources = list(values.pop("sources", []))
+    new_sources.extend(
+        {"url": url}
+        for url in values.pop("reference_urls", [])
+    )
+    merged_sources = merge_incident_sources(incident, new_sources)
+
+    # Copy JSON data so later edits cannot alter the saved history.
+    before = json.loads(json.dumps(incident_dict(incident, details=True)))
+    evidence = json.loads(json.dumps(candidate.evidence or {}))
+
+    scalar_changed = any(
+        getattr(incident, key) != value
+        for key, value in values.items()
+    )
+    old_source_urls = {source.url for source in incident.sources}
+    source_added = any(
+        source["url"] not in old_source_urls
+        for source in merged_sources
+    )
+    if not scalar_changed and not source_added:
+        raise ValueError("No changed fields or additional sources were supplied.")
+
+    for key, value in values.items():
+        setattr(incident, key, value)
+
+    _replace_relations(incident, {"sources": merged_sources})
+    incident.updated_at = utcnow()
+    session.flush()
+
+    after = json.loads(json.dumps(incident_dict(incident, details=True)))
+
+    session.add(IncidentRevision(
+        incident_id=incident.id,
+        candidate_id=candidate.id,
+        reason=reason.strip(),
+        before_snapshot=before,
+        after_snapshot=after,
+        evidence=evidence,
+    ))
+
+    candidate.status = "approved"
+    candidate.incident_id = incident.id
+    candidate.related_incident_id = incident.id
+    candidate.relationship_type = "update"
+    candidate.relationship_reason = reason.strip()
+
+    session.flush()
+    return incident
 
 def upsert_incident(session, payload, external_id=None, notify=False, import_batch_id=None, source_row=None, reviewed_candidate_id=None):
     """Return (incident, created), without committing. Historical imports use notify=False.
