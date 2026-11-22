@@ -8,8 +8,8 @@
 
 | Capability | Done when |
 | --- | --- |
-| Reviewed update API and revision storage | An existing database upgrades with its data intact and a disposable PostgreSQL run verifies a reviewed update, including conflicting submissions, evidence preservation, and one recorded revision. The release also needs safe updates from unflagged reports and administrator-only history. |
-| Local update UI draft | The agreed review journeys work end to end with fixtures, including a stale update, refresh of public data, and keyboard and mobile review. |
+| Reviewed update API and administrator revision history | Present and verified on SQLite and disposable PostgreSQL 14, including stale and competing updates. The production container smoke check remains open. |
+| Incident review UI | The three decisions, settings separation, and reload-and-compare recovery are implemented and core browser journeys passed. Remaining failure-path and accessibility checks are in the [numbered checklist](specs/incident-review/tasks.md). |
 | AI discovery, verification, and Telegram outboxes | Isolated tests cover expected gates and delivery outcomes. Live AI quality, usage, and scheduling are separate milestones below. Any external delivery check requires an explicitly approved test setup. |
 
 The review scope is agreed. The [specification](specs/incident-review/spec.md), [implementation plan](specs/incident-review/plan.md), and [numbered checklist](specs/incident-review/tasks.md) track the next milestone.

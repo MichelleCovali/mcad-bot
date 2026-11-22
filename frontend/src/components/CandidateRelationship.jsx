@@ -3,6 +3,7 @@ const relationshipLabels = {
   new_incident: "Proposed new incident",
   possible_update: "Possible update",
   possible_duplicate: "Possible duplicate",
+  update: "Applied to an existing incident",
 };
 
 export function CandidateRelationship({ candidate }) {
@@ -38,7 +39,7 @@ export function CandidateRelationship({ candidate }) {
         </p>
       )}
 
-      {(type === "possible_update" ||
+      {type !== "update" && (type === "possible_update" ||
         type === "possible_duplicate" ||
         relatedId) && (
         <p className="admin-help">

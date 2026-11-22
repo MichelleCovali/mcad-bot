@@ -7,7 +7,7 @@ from datetime import date, datetime
 from urllib.parse import urlsplit, urlunsplit
 from .models import Candidate, IncidentRevision
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from .models import Actor, Delivery, ImportRow, Incident, IncidentSource, Location, Organisation, OutboxEvent, Subscriber, utcnow
 
@@ -50,6 +50,15 @@ def safe_url(value):
     except ValueError:
         raise ValueError("source URLs must be ordinary http(s) URLs") from None
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", parsed.query, ""))
+
+
+def source_identity(url):
+    """Compare validated source URLs without rewriting the stored references."""
+    parsed = urlsplit(url)
+    default_port = {"http": 80, "https": 443}[parsed.scheme]
+    if parsed.port == default_port:
+        return urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit(":", 1)[0]))
+    return url
 
 
 def normalize_payload(payload, existing=None):
@@ -190,6 +199,18 @@ def create_publication_event(session, incident, reviewed_candidate_id=None):
             session.add(Delivery(event_id=event.id, chat_id=subscriber.chat_id))
     return event
 
+REVIEW_UPDATE_FIELDS = (
+    "title", "summary", "affected_system", "impact", "method",
+    "countermeasures", "additional_info",
+)
+
+
+class ReviewConflict(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 def apply_reviewed_incident_update(
     session, candidate_id, incident_id, payload, reason,
     expected_updated_at,
@@ -207,11 +228,13 @@ def apply_reviewed_incident_update(
         .where(Candidate.id == candidate_id)
         .with_for_update()
     )
-    if candidate is None or candidate.status != "pending":
-        raise ValueError("The candidate must exist and still be pending.")
+    if candidate is None:
+        raise ValueError("Report not found.")
+    if candidate.status != "pending":
+        raise ReviewConflict("report_resolved", "This report has already been reviewed.")
 
     if candidate.relationship_type not in {
-        "possible_update", "possible_duplicate"
+        "unclassified", "possible_update", "possible_duplicate"
     }:
         raise ValueError("This candidate is not awaiting relationship review.")
 
@@ -224,53 +247,64 @@ def apply_reviewed_incident_update(
         raise ValueError("Choose an existing published incident.")
 
     if expected_updated_at != incident.updated_at.isoformat():
-        raise ValueError(
-            "The incident changed since it was opened. "
-            "Reload it before applying this update."
+        raise ReviewConflict(
+            "stale_target", "The incident changed since it was opened. Reload and compare."
         )
+
+    fields = {snake_case(key) for key in payload}
+    if fields - set(REVIEW_UPDATE_FIELDS) - {"sources"}:
+        raise ValueError("This update includes protected fields.")
+    for key, value in payload.items():
+        if snake_case(key) != "sources" and (not isinstance(value, str) or not value.strip()):
+            raise ValueError("Selected changes must contain nonblank text.")
 
     values = normalize_payload(payload, existing=incident)
-
-    # These fields need their own dedicated workflows.
-    forbidden = {
-        "status", "external_id", "raw_fields", "source_url",
-        "qa", "reference_number",
-        "organisations", "actors", "locations",
-    }
-    if forbidden & set(values):
-        raise ValueError(
-            "This update includes protected fields: "
-            + ", ".join(sorted(forbidden & set(values)))
-        )
-
-    new_sources = list(values.pop("sources", []))
-    new_sources.extend(
-        {"url": url}
-        for url in values.pop("reference_urls", [])
-    )
-    merged_sources = merge_incident_sources(incident, new_sources)
+    selected_sources = values.pop("sources", [])
+    if not selected_sources:
+        raise ValueError("Select at least one source supporting this update.")
+    existing_sources = merge_incident_sources(incident, [])
+    merged_sources = merge_incident_sources(incident, selected_sources)
+    existing_urls = {source["url"] for source in existing_sources}
+    additions = [source for source in merged_sources if source["url"] not in existing_urls]
+    values = {key: value for key, value in values.items() if getattr(incident, key) != value}
+    if "summary" in values:
+        values["description"] = values["summary"]
+    if not values and not additions:
+        raise ValueError("No changed fields or additional sources were supplied.")
 
     # Copy JSON data so later edits cannot alter the saved history.
     before = json.loads(json.dumps(incident_dict(incident, details=True)))
     evidence = json.loads(json.dumps(candidate.evidence or {}))
 
-    scalar_changed = any(
-        getattr(incident, key) != value
-        for key, value in values.items()
-    )
-    old_source_urls = {source.url for source in incident.sources}
-    source_added = any(
-        source["url"] not in old_source_urls
-        for source in merged_sources
-    )
-    if not scalar_changed and not source_added:
-        raise ValueError("No changed fields or additional sources were supplied.")
+    evidence["reviewedUpdateSources"] = list(dict.fromkeys(
+        safe_url(source["url"]) for source in selected_sources
+    ))
 
-    for key, value in values.items():
-        setattr(incident, key, value)
+    claimed = session.execute(update(Candidate).where(
+        Candidate.id == candidate.id,
+        Candidate.status == "pending",
+        Candidate.relationship_type == candidate.relationship_type,
+    ).values(
+        status="approved",
+        incident_id=incident.id,
+        related_incident_id=incident.id,
+        relationship_type="update",
+        relationship_reason=reason.strip(),
+    ))
+    if claimed.rowcount != 1:
+        raise ReviewConflict("report_changed", "The report changed during review. Reload and compare.")
 
-    _replace_relations(incident, {"sources": merged_sources})
-    incident.updated_at = utcnow()
+    changed = session.execute(update(Incident).where(
+        Incident.id == incident.id,
+        Incident.status == "published",
+        Incident.updated_at == incident.updated_at,
+    ).values(**values, updated_at=utcnow()))
+    if changed.rowcount != 1:
+        raise ReviewConflict(
+            "stale_target", "The incident changed since it was opened. Reload and compare."
+        )
+
+    incident.sources.extend(IncidentSource(**source) for source in additions)
     session.flush()
 
     after = json.loads(json.dumps(incident_dict(incident, details=True)))
@@ -283,12 +317,6 @@ def apply_reviewed_incident_update(
         after_snapshot=after,
         evidence=evidence,
     ))
-
-    candidate.status = "approved"
-    candidate.incident_id = incident.id
-    candidate.related_incident_id = incident.id
-    candidate.relationship_type = "update"
-    candidate.relationship_reason = reason.strip()
 
     session.flush()
     return incident
@@ -360,6 +388,16 @@ def merge_incident_sources(incident, new_sources):
             "raw_text": "",
         }
 
+    identities = set()
+    for url in merged:
+        try:
+            normalized = safe_url(url)
+            if normalized:
+                identities.add(source_identity(normalized))
+        except ValueError:
+            # Preserve legacy references that predate URL validation.
+            identities.add(url)
+
     for source in new_sources:
         if not isinstance(source, dict):
             raise ValueError("Each new source must be an object.")
@@ -378,7 +416,9 @@ def merge_incident_sources(incident, new_sources):
             raise ValueError("Source names and excerpts must be text.")
 
         # Keep existing metadata when this URL is already recorded.
-        if url not in merged:
+        identity = source_identity(url)
+        if identity not in identities:
+            identities.add(identity)
             merged[url] = {
                 "url": url,
                 "short_name": short_name,
@@ -414,6 +454,31 @@ def incident_dict(incident, details=False):
         data["locations"] = [{"name": x.name, "country": x.country, "latitude": x.latitude, "longitude": x.longitude, "precision": x.precision, "source": x.source} for x in incident.locations]
         data["provenance"] = [{"importBatchId": x.import_batch_id, "sourceRow": x.source_row} for x in incident.provenance]
     return data
+
+
+def revision_dict(revision):
+    before, after = revision.before_snapshot, revision.after_snapshot
+    changes = []
+    for field in dict.fromkeys([*before, *after]):
+        if field in {"updatedAt", "sources", "rawFields", "provenance", "description"}:
+            continue
+        if before.get(field) != after.get(field):
+            changes.append({"field": field, "before": before.get(field), "after": after.get(field)})
+    if before.get("description") != after.get("description") and not any(
+        change["field"] == "summary" for change in changes
+    ):
+        changes.append({
+            "field": "description", "before": before.get("description"), "after": after.get("description"),
+        })
+    old_urls = {source["url"] for source in before.get("sources", [])}
+    old_urls.add(before.get("sourceUrl"))
+    return {
+        "id": revision.id,
+        "createdAt": iso(revision.created_at),
+        "reason": revision.reason,
+        "changes": changes,
+        "addedSources": [source["url"] for source in after.get("sources", []) if source["url"] not in old_urls],
+    }
 
 
 def candidate_dict(candidate):

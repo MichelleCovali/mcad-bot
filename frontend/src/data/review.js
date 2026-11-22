@@ -44,7 +44,7 @@ export const REVIEW_FIELDS = [
 
 const camelCase = (key) =>
   key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
-const referenceIdentity = (value) => {
+export const referenceIdentity = (value) => {
   const safe = safeReferenceUrl(value);
   if (!safe) return null;
   const url = new URL(safe);

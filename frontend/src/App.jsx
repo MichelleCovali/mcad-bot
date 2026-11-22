@@ -540,7 +540,7 @@ export function App() {
       {panel && (
         <div className="panel-backdrop" onClick={() => setPanel(null)}>
           <section
-            className="content-panel"
+            className={panel === "report" ? "content-panel report-panel" : "content-panel"}
             role="dialog"
             aria-modal="true"
             aria-labelledby="panel-title"
@@ -549,9 +549,9 @@ export function App() {
               if (event.key !== "Tab") return;
               const focusable = [
                 ...event.currentTarget.querySelectorAll(
-                  "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
+                  "button:enabled, a[href], input:enabled, select:enabled, textarea:enabled, summary",
                 ),
-              ];
+              ].filter((element) => element.getClientRects().length > 0);
               const first = focusable[0],
                 last = focusable[focusable.length - 1];
               if (event.shiftKey && document.activeElement === first) {
@@ -568,7 +568,7 @@ export function App() {
                 {panel === "detail"
                   ? "Incident details"
                   : panel === "report"
-                    ? "Review and publish"
+                    ? "Incident review"
                     : navigation.find(([key]) => key === panel)?.[1]}
               </h1>
               <button
@@ -673,7 +673,10 @@ export function App() {
               />
             )}
             {panel === "report" && (
-              <AdminPanel onChanged={() => setReload((value) => value + 1)} />
+              <AdminPanel
+                onChanged={() => setReload((value) => value + 1)}
+                publicRefreshError={dataError}
+              />
             )}
           </section>
         </div>

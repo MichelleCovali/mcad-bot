@@ -18,6 +18,11 @@ import {
 } from "../src/data/review.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import {
+  incidentUpdateOptions,
+  selectedIncidentChanges,
+  incidentUpdateSources,
+} from "../src/data/incidentUpdates.js";
 
 // Test-only inputs. These are never bundled as default map records.
 test("Telegram checks are explicit authenticated requests and never start AI", async () => {
@@ -833,4 +838,193 @@ test("candidate relationship displays the explanation and incident link", async 
   } finally {
     await server.close();
   }
+});
+
+test("incident update client preserves versions and sends explicit changes", async () => {
+  const calls = [];
+  const version = "2026-11-22T12:30:00.123456";
+
+  const client = createAdminClient("test-token", {
+    baseUrl: "/api",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+
+      if (url === "/api/incidents") {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{ id: "incident/one", title: "Test incident" }],
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          id: "incident/one",
+          reviewVersion: version,
+        }),
+      };
+    },
+  });
+
+  const records = await client.incidents();
+  assert.equal(records[0].id, "incident/one");
+
+  const incident = await client.incident("incident/one");
+  assert.equal(incident.reviewVersion, version);
+
+  const update = {
+    incidentId: incident.id,
+    reviewVersion: incident.reviewVersion,
+    confirmation: { incidentId: incident.id, reviewVersion: incident.reviewVersion },
+    reason: "Reviewed source confirms the impact.",
+    changes: {
+      impact: "Three-day shutdown.",
+      sources: [{ url: "https://example.invalid/report" }],
+    },
+  };
+  await client.applyUpdate("candidate/one", update);
+
+  assert.deepEqual(
+    calls.map(({ url, options }) => [url, options.method]),
+    [
+      ["/api/incidents", "GET"],
+      ["/api/incidents/incident%2Fone", "GET"],
+      ["/api/admin/candidates/candidate%2Fone/apply-update", "POST"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(calls[2].options.body), update);
+  assert.ok(
+    calls.every(
+      ({ options }) => options.headers.Authorization === "Bearer test-token",
+    ),
+  );
+});
+
+test("incident updates include only selected nonblank changed fields", () => {
+  const incident = {
+    title: "Port X incident",
+    summary: "Original summary.",
+    impact: "Original impact.",
+    affectedSystem: "Navigation",
+    victimCountry: "Netherlands",
+  };
+  const draft = {
+    title: "Port X incident",
+    summary: "Reviewed summary.",
+    impact: "Reviewed impact.",
+    affectedSystem: "   ",
+    victimCountry: "Belgium",
+  };
+
+  const options = incidentUpdateOptions(incident, draft);
+
+  assert.deepEqual(
+    options.map(({ key }) => key),
+    ["summary", "impact"],
+  );
+  assert.equal(options[0].current, "Original summary.");
+  assert.equal(options[0].proposed, "Reviewed summary.");
+
+  assert.deepEqual(selectedIncidentChanges(incident, draft, ["impact"]), {
+    impact: "Reviewed impact.",
+  });
+  assert.deepEqual(selectedIncidentChanges(incident, draft, ["summary"]), {
+    summary: "Reviewed summary.",
+  });
+  assert.deepEqual(selectedIncidentChanges(incident, draft, []), {});
+
+  assert.throws(
+    () => selectedIncidentChanges(incident, draft, ["affectedSystem"]),
+    /no longer available/,
+  );
+  assert.throws(
+    () => selectedIncidentChanges(incident, draft, ["victimCountry"]),
+    /no longer available/,
+  );
+
+  // Preparing changes must not modify the original record.
+  assert.equal(incident.summary, "Original summary.");
+  assert.equal(incident.impact, "Original impact.");
+  assert.equal(incident.victimCountry, "Netherlands");
+});
+
+test("update sources preserve evidence and exclude unsafe repeated links", () => {
+  const draft = {
+    sourceUrl: "https://example.com/report",
+    referenceUrlsText: [
+      "https://example.com/report#section",
+      "https://example.org/second",
+      "javascript:alert(1)",
+      "https://user:password@example.net/private",
+    ].join("\n"),
+    referenceSources: [
+      {
+        url: "https://example.com/report",
+        shortName: "Original reporting",
+        rawText: "Evidence reviewed by the researcher.",
+      },
+    ],
+  };
+
+  const sources = incidentUpdateSources(draft);
+
+  assert.deepEqual(sources, [
+    {
+      url: "https://example.com/report",
+      shortName: "Original reporting",
+      rawText: "Evidence reviewed by the researcher.",
+    },
+    {
+      url: "https://example.org/second",
+      shortName: "",
+      rawText: "",
+    },
+  ]);
+
+  assert.deepEqual(incidentUpdateSources({}), []);
+  assert.equal(
+    draft.referenceSources[0].rawText,
+    "Evidence reviewed by the researcher.",
+  );
+});
+
+test("review conflicts retain the API code for reload and compare", async () => {
+  const client = createAdminClient("test-token", {
+    fetchImpl: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ code: "stale_target", detail: "Reload and compare." }),
+    }),
+  });
+  await assert.rejects(
+    client.applyUpdate("report", {}),
+    { code: "stale_target", message: "Reload and compare." },
+  );
+});
+
+test("the update picker includes structured-only sources and keeps recorded evidence across URL variants", () => {
+  const draft = {
+    sourceUrl: "https://EXAMPLE.invalid/report#intro",
+    referenceSources: [
+      { url: "https://example.invalid/report", shortName: "Report", rawText: "Report excerpt" },
+      { url: "https://example.invalid/structured", shortName: "Structured only", rawText: "Additional evidence" },
+    ],
+  };
+  const incident = {
+    sources: [{ url: "https://example.invalid:443/report#archive", shortName: "Recorded report", rawText: "Earlier evidence" }],
+  };
+  assert.deepEqual(incidentUpdateSources(draft, incident), [
+    { url: "https://example.invalid/report", shortName: "Recorded report", rawText: "Earlier evidence" },
+    { url: "https://example.invalid/structured", shortName: "Structured only", rawText: "Additional evidence" },
+  ]);
+  assert.equal(incidentUpdateSources(draft)[0].rawText, "Report excerpt");
+});
+
+test("the update picker treats an explicit HTTP default port as the recorded source", () => {
+  assert.deepEqual(incidentUpdateSources(
+    { sourceUrl: "http://example.invalid:80/report" },
+    { sources: [{ url: "http://example.invalid/report", shortName: "Recorded", rawText: "Earlier evidence" }] },
+  ), [{ url: "http://example.invalid/report", shortName: "Recorded", rawText: "Earlier evidence" }]);
 });

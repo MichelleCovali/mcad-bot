@@ -17,8 +17,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import Settings
 from .db import get_session_factory, make_engine
-from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
-from .service import candidate_dict, incident_dict, iso, update_incident, upsert_incident
+from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, IncidentRevision, Subscriber
+from .service import ReviewConflict, apply_reviewed_incident_update, candidate_dict, incident_dict, iso, revision_dict, update_incident, upsert_incident
 from .security import ProtectedRequestsMiddleware
 
 
@@ -61,6 +61,10 @@ def create_app(settings=None, engine=None):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(token.encode("utf-8"), settings.admin_api_token.encode("utf-8")):
             raise HTTPException(401, "A valid administrator bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+
+    @app.exception_handler(ReviewConflict)
+    async def review_conflict(_request, error):
+        return JSONResponse(status_code=409, content={"code": error.code, "detail": str(error)})
 
     @app.exception_handler(ValueError)
     async def invalid_value(_request, error):
@@ -131,6 +135,18 @@ def create_app(settings=None, engine=None):
             update_incident(session, incident, payload)
             result = incident_dict(incident, details=True)
         return result
+
+    @app.get("/api/admin/incidents/{incident_id}/revisions", dependencies=[Depends(require_admin)])
+    def get_incident_revisions(incident_id: str, session=Depends(session_dependency)):
+        incident = session.get(Incident, incident_id)
+        if incident is None or incident.status != "published":
+            raise HTTPException(404, "Incident not found.")
+        revisions = session.scalars(
+            select(IncidentRevision)
+            .where(IncidentRevision.incident_id == incident_id)
+            .order_by(IncidentRevision.created_at.desc(), IncidentRevision.id.desc())
+        )
+        return {"items": [revision_dict(revision) for revision in revisions]}
 
     @app.get("/api/admin/candidates", dependencies=[Depends(require_admin)])
     def list_candidates(status: str = "pending", session=Depends(session_dependency)):
@@ -210,10 +226,19 @@ def create_app(settings=None, engine=None):
             })
             evidence["relationshipReviews"] = history
 
-            candidate.evidence = evidence
-            candidate.relationship_type = "new_incident"
-            candidate.related_incident_id = None
-            candidate.relationship_reason = reason.strip()
+            changed = session.execute(update(Candidate).where(
+                Candidate.id == candidate.id,
+                Candidate.status == "pending",
+                Candidate.relationship_type == candidate.relationship_type,
+                Candidate.related_incident_id == candidate.related_incident_id,
+            ).values(
+                evidence=evidence,
+                relationship_type="new_incident",
+                related_incident_id=None,
+                relationship_reason=reason.strip(),
+            ))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "The report changed during review. Refresh the queue.")
 
             result = candidate_dict(candidate)
 
@@ -228,9 +253,7 @@ def create_app(settings=None, engine=None):
         payload: dict = Body(...),
         session=Depends(session_dependency),
     ):
-        from .service import apply_reviewed_incident_update
-
-        allowed = {"incidentId", "changes", "reason", "reviewVersion"}
+        allowed = {"incidentId", "changes", "reason", "reviewVersion", "confirmation"}
         if set(payload) - allowed:
             raise HTTPException(422, "Unexpected update request fields.")
 
@@ -252,6 +275,11 @@ def create_app(settings=None, engine=None):
         ):
             raise HTTPException(
                 422, "Open the incident to obtain its review version."
+            )
+
+        if payload.get("confirmation") != {"incidentId": incident_id, "reviewVersion": version}:
+            raise HTTPException(
+                422, "Confirm the selected incident and its current version. Reload the page if this control is unavailable."
             )
 
         if not isinstance(changes, dict) or not changes:
@@ -280,9 +308,14 @@ def create_app(settings=None, engine=None):
             if candidate is None:
                 raise HTTPException(404, "Candidate not found.")
             if candidate.status == "approved" and candidate.incident_id:
+                if candidate.relationship_type == "update":
+                    raise ReviewConflict(
+                        "report_resolved",
+                        "This report was already applied as an update to an existing incident.",
+                    )
                 return incident_dict(session.get(Incident, candidate.incident_id), details=True)
             if candidate.status != "pending":
-                raise HTTPException(409, "Only pending candidates can be approved.")
+                raise ReviewConflict("report_resolved", "This report has already been reviewed.")
             if (
                 candidate.relationship_type not in {
                     "unclassified", "new_incident"
@@ -303,7 +336,7 @@ def create_app(settings=None, engine=None):
                 Candidate.id == candidate_id, Candidate.status == "pending"
             ).values(status="approved").execution_options(synchronize_session=False))
             if changed.rowcount != 1:
-                raise HTTPException(409, "This candidate has already been reviewed. Refresh the queue.")
+                raise ReviewConflict("report_resolved", "This report has already been reviewed.")
             approved = dict(payload)
             approved["status"] = "published"
             approved.setdefault("sourceUrl", candidate.source_url)

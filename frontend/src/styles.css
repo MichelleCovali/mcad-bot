@@ -1563,3 +1563,73 @@ header form.searchbar ul.typeahead .no-results button {
 .import-report {
   margin-top: 22px;
 }
+
+.content-panel.report-panel {
+  width: min(1060px, 100%);
+}
+.review-workspace.has-report {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr);
+  gap: 24px;
+}
+.review-workspace .candidate-queue,
+.review-report {
+  min-width: 0;
+  margin-top: 18px;
+  overflow-wrap: anywhere;
+}
+.review-workspace.has-report .candidate-queue {
+  border-right: 1px solid #e9edf0;
+  padding-right: 18px;
+}
+.review-report h2,
+.review-report h3 {
+  color: #00294b;
+}
+.review-report .admin-actions,
+.review-report form,
+.review-report .review-source {
+  margin-block: 16px;
+}
+.admin-actions button[aria-pressed="true"] {
+  color: #fff;
+  background: #005aaa;
+}
+.admin-panel :focus-visible {
+  outline: 2px solid #005aaa;
+  outline-offset: 3px;
+}
+.admin-panel .review-check {
+  flex-direction: row;
+  align-items: baseline;
+}
+.admin-panel input[type="checkbox"] {
+  width: auto;
+}
+.incident-update-review fieldset {
+  min-width: 0;
+}
+.review-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.review-comparison p {
+  white-space: pre-wrap;
+}
+.revision-history {
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 768px) {
+  .review-workspace.has-report {
+    display: block;
+  }
+  .review-workspace.has-report .candidate-queue {
+    display: none;
+  }
+  .review-comparison {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+}
