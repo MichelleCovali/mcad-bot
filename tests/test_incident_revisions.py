@@ -314,3 +314,91 @@ def test_stale_updates_and_failed_transactions_leave_records_unchanged():
             ) == 0
     finally:
         engine.dispose()
+
+def test_update_api_uses_review_version_and_prevents_repeat_application(tmp_path):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import func, select
+
+    from mcad.api import create_app
+    from mcad.config import Settings
+    from mcad.models import OutboxEvent
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'update-api.sqlite3'}"
+    )
+    try:
+        migrations.migrate(engine)
+
+        with Session(engine) as session:
+            with session.begin():
+                incident = Incident(
+                    title="Fictional Port X incident",
+                    summary="Original information.",
+                    status="published",
+                )
+                session.add(incident)
+                session.flush()
+
+                candidate = Candidate(
+                    title="Fictional update",
+                    source_url="https://example.com/update",
+                    relationship_type="possible_update",
+                    related_incident_id=incident.id,
+                )
+                session.add(candidate)
+                session.flush()
+
+                incident_id = incident.id
+                candidate_id = candidate.id
+
+        app = create_app(
+            settings=Settings(
+                admin_api_token="test-admin-token",
+                enable_workers=False,
+            ),
+            engine=engine,
+        )
+        headers = {"Authorization": "Bearer test-admin-token"}
+        path = f"/api/admin/candidates/{candidate_id}/apply-update"
+
+        with TestClient(app) as client:
+            opened = client.get(f"/api/incidents/{incident_id}")
+            assert opened.status_code == 200
+            version = opened.json()["reviewVersion"]
+
+            request = {
+                "incidentId": incident_id,
+                "reviewVersion": version,
+                "reason": "Reviewed source confirms the impact.",
+                "changes": {"summary": "Reviewed new information."},
+            }
+
+            assert client.post(path, json=request).status_code == 401
+
+            stale = {**request, "reviewVersion": "outdated-version"}
+            response = client.post(path, headers=headers, json=stale)
+            assert response.status_code == 422
+            assert "changed since" in response.json()["detail"]
+
+            response = client.post(path, headers=headers, json=request)
+            assert response.status_code == 200, response.text
+            assert response.json()["id"] == incident_id
+            assert response.json()["summary"] == "Reviewed new information."
+
+            # The candidate has already been approved.
+            repeated = client.post(path, headers=headers, json=request)
+            assert repeated.status_code == 422
+
+        with Session(engine) as session:
+            assert session.scalar(
+                select(func.count()).select_from(IncidentRevision)
+            ) == 1
+            assert session.scalar(
+                select(func.count()).select_from(Incident)
+            ) == 1
+            assert session.get(Candidate, candidate_id).status == "approved"
+            assert session.scalar(
+                select(func.count()).select_from(OutboxEvent)
+            ) == 0
+    finally:
+        engine.dispose()

@@ -111,7 +111,9 @@ def create_app(settings=None, engine=None):
         record = session.get(Incident, incident_id)
         if record is None or record.status != "published":
             raise HTTPException(404, "Incident not found.")
-        return incident_dict(record, details=True)
+        result = incident_dict(record, details=True)
+        result["reviewVersion"] = record.updated_at.isoformat()
+        return result
 
     @app.post("/api/incidents", dependencies=[Depends(require_admin)])
     def create_incident(payload: dict = Body(...), session=Depends(session_dependency)):
@@ -214,6 +216,60 @@ def create_app(settings=None, engine=None):
             candidate.relationship_reason = reason.strip()
 
             result = candidate_dict(candidate)
+
+        return result
+
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/apply-update",
+        dependencies=[Depends(require_admin)],
+    )
+    def apply_candidate_update(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency),
+    ):
+        from .service import apply_reviewed_incident_update
+
+        allowed = {"incidentId", "changes", "reason", "reviewVersion"}
+        if set(payload) - allowed:
+            raise HTTPException(422, "Unexpected update request fields.")
+
+        incident_id = payload.get("incidentId")
+        version = payload.get("reviewVersion")
+        changes = payload.get("changes")
+
+        if (
+            not isinstance(incident_id, str)
+            or not incident_id.strip()
+            or len(incident_id) > 36
+        ):
+            raise HTTPException(422, "Choose a valid incident ID.")
+
+        if (
+            not isinstance(version, str)
+            or not version.strip()
+            or len(version) > 64
+        ):
+            raise HTTPException(
+                422, "Open the incident to obtain its review version."
+            )
+
+        if not isinstance(changes, dict) or not changes:
+            raise HTTPException(
+                422, "Provide the specific changes to apply."
+            )
+
+        with session.begin():
+            incident = apply_reviewed_incident_update(
+                session,
+                candidate_id,
+                incident_id,
+                changes,
+                payload.get("reason"),
+                expected_updated_at=version,
+            )
+            result = incident_dict(incident, details=True)
+            result["reviewVersion"] = incident.updated_at.isoformat()
 
         return result
 
