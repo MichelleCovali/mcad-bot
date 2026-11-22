@@ -208,3 +208,58 @@ def test_invitation_redemption_and_last_admin_invariant_are_atomic(postgres_data
         assert sorted(pool.map(deactivate, member_ids)) == [False, True]
     with factory() as session:
         assert len(session.scalars(select(AdminUser).where(AdminUser.active.is_(True))).all()) == 1
+@pytest.mark.parametrize("same_report", [False, True])
+def test_competing_reviewed_updates_leave_one_revision(postgres_database, same_report):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from mcad.models import IncidentRevision
+    from mcad.service import ReviewConflict, apply_reviewed_incident_update
+
+    engine, factory = postgres_database
+    migrate(engine)
+    with factory.begin() as session:
+        incident, _ = upsert_incident(session, {
+            "title": "Fictional incident", "sourceUrl": "https://example.invalid/original",
+        })
+        reports = [Candidate(title="Fictional report", source_url=f"https://example.invalid/{index}")
+                   for index in range(1 if same_report else 2)]
+        session.add_all(reports)
+        session.flush()
+        incident_id, version = incident.id, incident.updated_at.isoformat()
+        report_ids = [report.id for report in reports]
+
+    start = Barrier(2, timeout=5)
+
+    def apply(index):
+        try:
+            with factory.begin() as session:
+                start.wait()
+                apply_reviewed_incident_update(
+                    session, report_ids[0 if same_report else index], incident_id,
+                    {"summary": f"Correction {index}", "sources": [
+                        {"url": "https://example.invalid/original"}, {"url": "https://example.net/corroboration"},
+                    ]},
+                    "Reviewed correction", expected_updated_at=version, independent_sources_confirmed=True,
+                )
+        except ReviewConflict as conflict:
+            return conflict.code
+        return "saved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(apply, range(2)))
+
+    assert sorted(results) == sorted(["saved", "report_resolved" if same_report else "stale_target"])
+    assert count(factory, IncidentRevision) == 1
+    assert count(factory, OutboxEvent) == 0
+    with factory() as session:
+        states = sorted(session.get(Candidate, report_id).status for report_id in report_ids)
+        assert states == (["approved"] if same_report else ["approved", "pending"])
+
+
+@pytest.mark.parametrize("history", ["main", "feature"])
+def test_postgres_upgrade_from_existing_branch_history(postgres_database, history):
+    from test_integration_migrations import check_history_upgrade
+
+    engine, _ = postgres_database
+    check_history_upgrade(engine, history)

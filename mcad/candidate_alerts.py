@@ -16,6 +16,21 @@ from .service import safe_url
 from .telegram_feedback import send_notification
 
 
+def _reviewable(candidate, private):
+    if not candidate or candidate.origin != "ai" or candidate.status != "pending" or candidate.baseline:
+        return False
+    evidence = candidate.evidence or {}
+    related = (
+        candidate.relationship_type in {"possible_update", "possible_duplicate"}
+        or candidate.related_incident_id is not None
+        or (candidate.relationship_type != "new_incident"
+            and (evidence.get("materialUpdate") or evidence.get("suggestedIncidentId")))
+    )
+    if related:
+        return bool(private and candidate.verification_status in {"supported", "needs_review"})
+    return candidate.verification_status == "supported"
+
+
 def create_candidate_notification(session, candidate, review_chat_id=""):
     """Queue a supported AI draft for the review chat or legacy subscribers.
 
@@ -23,7 +38,7 @@ def create_candidate_notification(session, candidate, review_chat_id=""):
     function never creates another event, adds new recipients, or sends HTTP.
     """
     session.flush()
-    if candidate.origin != "ai" or candidate.verification_status != "supported" or candidate.status != "pending" or candidate.baseline:
+    if not _reviewable(candidate, bool(review_chat_id)):
         return None
     source_url = safe_url(candidate.source_url)
     if not source_url:
@@ -31,7 +46,7 @@ def create_candidate_notification(session, candidate, review_chat_id=""):
     now, event_id = utcnow(), str(uuid4())
     insert = postgres_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
     payload = {"candidateId": candidate.id, "title": candidate.title,
-               "sourceUrl": source_url, "verificationStatus": "supported", "reviewRequired": True}
+               "sourceUrl": source_url, "verificationStatus": candidate.verification_status, "reviewRequired": True}
     if review_chat_id:
         payload["reviewChatId"] = review_chat_id
     inserted_id = session.scalar(insert(CandidateNotification).values(
@@ -134,8 +149,7 @@ def deliver_candidate_one(factory, client, base_url="", owner=None, now=None, me
             active = editorial_chat == review_chat_id == delivery.chat_id
         else:
             active = bool(not review_chat_id and subscriber and subscriber.active and subscriber.subscribed_at <= event.created_at)
-        reviewable = bool(candidate and candidate.status == "pending" and candidate.origin == "ai"
-                          and candidate.verification_status == "supported" and not candidate.baseline)
+        reviewable = _reviewable(candidate, bool(editorial_chat))
         delivery.lease_until, delivery.lease_owner = None, None
         if not active or not reviewable:
             delivery.status = "cancelled"

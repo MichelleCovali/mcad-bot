@@ -13,15 +13,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from openpyxl.utils.exceptions import InvalidFileException
 from fastapi.middleware.gzip import GZipMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .auth_api import auth_router
 from .config import Settings
 from .db import get_session_factory, make_engine
 from .editorial import approve_candidate, create_manual_incident, edit_manual_incident, reject_candidate
-from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, Subscriber
-from .service import candidate_dict, incident_dict, iso
+from .models import Candidate, CandidateDelivery, Delivery, ImportBatch, Incident, IncidentRevision, Subscriber
+from .service import ReviewConflict, apply_reviewed_incident_update, candidate_dict, incident_dict, iso, revision_dict
 from .security import ProtectedRequestsMiddleware
 
 
@@ -78,6 +78,10 @@ def create_app(settings=None, engine=None):
             return JSONResponse(status_code=422, content={"detail": "Send a valid JSON object."})
         return await request_validation_exception_handler(request, error)
 
+    @app.exception_handler(ReviewConflict)
+    async def review_conflict(_request, error):
+        return JSONResponse(status_code=409, content={"code": error.code, "detail": str(error)})
+
     @app.exception_handler(ValueError)
     async def invalid_value(_request, error):
         return JSONResponse(status_code=422, content={"detail": str(error)})
@@ -127,7 +131,9 @@ def create_app(settings=None, engine=None):
         record = session.get(Incident, incident_id)
         if record is None or record.status != "published":
             raise HTTPException(404, "Incident not found.")
-        return incident_dict(record, details=True)
+        result = incident_dict(record, details=True)
+        result["reviewVersion"] = record.updated_at.isoformat()
+        return result
 
     @app.post("/api/incidents", dependencies=[Depends(require_admin)])
     def create_incident(payload: dict = Body(...), session=Depends(session_dependency)):
@@ -145,6 +151,18 @@ def create_app(settings=None, engine=None):
             edit_manual_incident(session, incident, payload)
             result = incident_dict(incident, details=True)
         return result
+
+    @app.get("/api/admin/incidents/{incident_id}/revisions", dependencies=[Depends(require_admin)])
+    def get_incident_revisions(incident_id: str, session=Depends(session_dependency)):
+        incident = session.get(Incident, incident_id)
+        if incident is None or incident.status != "published":
+            raise HTTPException(404, "Incident not found.")
+        revisions = session.scalars(
+            select(IncidentRevision)
+            .where(IncidentRevision.incident_id == incident_id)
+            .order_by(IncidentRevision.created_at.desc(), IncidentRevision.id.desc())
+        )
+        return {"items": [revision_dict(revision) for revision in revisions]}
 
     @app.get("/api/admin/candidates", dependencies=[Depends(require_reviewer)])
     def list_candidates(status: str = "pending", session=Depends(session_dependency)):
@@ -175,6 +193,130 @@ def create_app(settings=None, engine=None):
         if candidate is None:
             raise HTTPException(404, "Candidate not found.")
         return candidate_dict(candidate)
+
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/relationship",
+        dependencies=[Depends(require_reviewer)],
+    )
+    def resolve_candidate_relationship(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency),
+    ):
+        if payload.get("decision") != "new_incident":
+            raise HTTPException(
+                422, "The supported decision is new_incident."
+            )
+
+        reason = payload.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > 2000
+        ):
+            raise HTTPException(
+                422, "Provide a review reason of 1–2000 characters."
+            )
+
+        with session.begin():
+            candidate = session.scalar(
+                select(Candidate)
+                .where(Candidate.id == candidate_id)
+                .with_for_update()
+            )
+            if candidate is None:
+                raise HTTPException(404, "Candidate not found.")
+            if candidate.status != "pending":
+                raise HTTPException(
+                    409, "Only pending candidates can be reclassified."
+                )
+
+            evidence = dict(candidate.evidence or {})
+            history = list(evidence.get("relationshipReviews", []))
+            history.append({
+                "previousType": candidate.relationship_type,
+                "previousRelatedIncidentId": candidate.related_incident_id,
+                "previousReason": candidate.relationship_reason,
+                "decision": "new_incident",
+                "reason": reason.strip(),
+            })
+            evidence["relationshipReviews"] = history
+
+            changed = session.execute(update(Candidate).where(
+                Candidate.id == candidate.id,
+                Candidate.status == "pending",
+                Candidate.relationship_type == candidate.relationship_type,
+                Candidate.related_incident_id == candidate.related_incident_id,
+            ).values(
+                evidence=evidence,
+                relationship_type="new_incident",
+                related_incident_id=None,
+                relationship_reason=reason.strip(),
+            ))
+            if changed.rowcount != 1:
+                raise HTTPException(409, "The report changed during review. Refresh the queue.")
+
+            result = candidate_dict(candidate)
+
+        return result
+
+    @app.post(
+        "/api/admin/candidates/{candidate_id}/apply-update",
+        dependencies=[Depends(require_reviewer)],
+    )
+    def apply_candidate_update(
+        candidate_id: str,
+        payload: dict = Body(...),
+        session=Depends(session_dependency),
+    ):
+        allowed = {"incidentId", "changes", "reason", "reviewVersion", "confirmation", "independentSourcesConfirmed"}
+        if set(payload) - allowed:
+            raise HTTPException(422, "Unexpected update request fields.")
+
+        incident_id = payload.get("incidentId")
+        version = payload.get("reviewVersion")
+        changes = payload.get("changes")
+
+        if (
+            not isinstance(incident_id, str)
+            or not incident_id.strip()
+            or len(incident_id) > 36
+        ):
+            raise HTTPException(422, "Choose a valid incident ID.")
+
+        if (
+            not isinstance(version, str)
+            or not version.strip()
+            or len(version) > 64
+        ):
+            raise HTTPException(
+                422, "Open the incident to obtain its review version."
+            )
+
+        if payload.get("confirmation") != {"incidentId": incident_id, "reviewVersion": version}:
+            raise HTTPException(
+                422, "Confirm the selected incident and its current version. Reload the page if this control is unavailable."
+            )
+
+        if not isinstance(changes, dict) or not changes:
+            raise HTTPException(
+                422, "Provide the specific changes to apply."
+            )
+
+        with session.begin():
+            incident = apply_reviewed_incident_update(
+                session,
+                candidate_id,
+                incident_id,
+                changes,
+                payload.get("reason"),
+                expected_updated_at=version,
+                independent_sources_confirmed=payload.get("independentSourcesConfirmed"),
+            )
+            result = incident_dict(incident, details=True)
+            result["reviewVersion"] = incident.updated_at.isoformat()
+
+        return result
 
     @app.post("/api/admin/candidates/{candidate_id}/approve", dependencies=[Depends(require_reviewer)])
     def approve_report(candidate_id: str, payload: dict = Body(...), session=Depends(session_dependency)):

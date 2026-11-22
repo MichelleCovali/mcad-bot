@@ -44,7 +44,7 @@ def _reviewer_route(path, method):
         return prefix == "/api/admin/candidates" and bool(candidate)
     if method == "POST":
         prefix, _, action = path.rpartition("/")
-        return action in {"approve", "reject"} and prefix.rpartition("/")[0] == "/api/admin/candidates"
+        return action in {"approve", "reject", "relationship", "apply-update"} and prefix.rpartition("/")[0] == "/api/admin/candidates"
     return False
 
 

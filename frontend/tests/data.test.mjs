@@ -15,6 +15,11 @@ import { createIncidentSearchIndex, incidentFacetOptions, searchIncidentIndex, s
 import { candidateDraft, reviewedIncidentPayload, submitReviewedIncident, requestedReviewCandidate } from "../src/data/review.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import {
+  incidentUpdateOptions,
+  selectedIncidentChanges,
+  incidentUpdateSources,
+} from "../src/data/incidentUpdates.js";
 
 // Test-only inputs. These are never bundled as default map records.
 test("workspace authentication uses same-origin cookies and never forwards an access token", async () => {
@@ -37,13 +42,19 @@ test("workspace authentication uses same-origin cookies and never forwards an ac
 
 test("Telegram checks are explicit authenticated requests and never start AI", async () => {
   const calls = [];
-  const client = createAdminClient("test-token", { baseUrl: "/api", fetchImpl: async (url, options) => {
-    calls.push([url, options]);
-    return { ok: true, json: async () => ({ ok: true }) };
-  } });
+  const client = createAdminClient("test-token", {
+    baseUrl: "/api",
+    fetchImpl: async (url, options) => {
+      calls.push([url, options]);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
   assert.equal(calls.length, 0);
   await client.telegramStatus();
-  assert.deepEqual(calls.map(([url, opts]) => [url, opts.method]), [["/api/admin/telegram", "GET"]]);
+  assert.deepEqual(
+    calls.map(([url, opts]) => [url, opts.method]),
+    [["/api/admin/telegram", "GET"]],
+  );
   await client.testTelegram();
   assert.equal(calls[1][0], "/api/admin/telegram/test");
   assert.equal(calls[1][1].method, "POST");
@@ -54,15 +65,32 @@ test("Telegram checks are explicit authenticated requests and never start AI", a
 test("Telegram review links open pending or already-reviewed reports without writes", async () => {
   const pending = { id: "candidate-one", status: "pending" };
   const paths = [];
-  const client = createAdminClient("test-token", { baseUrl: "/api", fetchImpl: async (url, options) => {
-    assert.equal(options.method, "GET");
-    paths.push(url);
-    return { ok: true, json: async () => ({ id: "reviewed/one", status: "approved" }) };
-  } });
+  const client = createAdminClient("test-token", {
+    baseUrl: "/api",
+    fetchImpl: async (url, options) => {
+      assert.equal(options.method, "GET");
+      paths.push(url);
+      return {
+        ok: true,
+        json: async () => ({ id: "reviewed/one", status: "approved" }),
+      };
+    },
+  });
   assert.equal(await requestedReviewCandidate(client, [pending], ""), null);
-  assert.equal(await requestedReviewCandidate(client, [pending], "?candidate=candidate-one"), pending);
+  assert.equal(
+    await requestedReviewCandidate(
+      client,
+      [pending],
+      "?candidate=candidate-one",
+    ),
+    pending,
+  );
   assert.equal(paths.length, 0);
-  assert.equal((await requestedReviewCandidate(client, [], "?candidate=reviewed%2Fone")).status, "approved");
+  assert.equal(
+    (await requestedReviewCandidate(client, [], "?candidate=reviewed%2Fone"))
+      .status,
+    "approved",
+  );
   assert.deepEqual(paths, ["/api/admin/candidates/reviewed%2Fone"]);
 });
 
@@ -405,49 +433,99 @@ test("review history, rejection and AI settings use authenticated dedicated rout
   });
   await client.candidates({ status: "rejected" });
   await client.candidates({ status: "approved" });
-  await client.reject("report/a b", { reason: "insufficient_evidence", notes: "Only one original report." });
+  await client.reject("report/a b", {
+    reason: "insufficient_evidence",
+    notes: "Only one original report.",
+  });
   await client.catalogs();
   await client.aiStatus();
-  await client.saveAISettings({ enabled: false, runsPerDay: 4, lookbackHours: 48, maxCandidates: 5, maxToolCalls: 15 });
-  assert.deepEqual(requests.map(({ url }) => url), [
-    "/api/admin/candidates?status=rejected", "/api/admin/candidates?status=approved",
-    "/api/admin/candidates/report%2Fa%20b/reject", "/api/admin/catalogs",
-    "/api/admin/ai-monitor", "/api/admin/ai-monitor",
-  ]);
-  for (const request of requests) assert.equal(request.options.headers.Authorization, "Bearer test-token");
+  await client.saveAISettings({
+    enabled: false,
+    runsPerDay: 4,
+    lookbackHours: 48,
+    maxCandidates: 5,
+    maxToolCalls: 15,
+  });
+  assert.deepEqual(
+    requests.map(({ url }) => url),
+    [
+      "/api/admin/candidates?status=rejected",
+      "/api/admin/candidates?status=approved",
+      "/api/admin/candidates/report%2Fa%20b/reject",
+      "/api/admin/catalogs",
+      "/api/admin/ai-monitor",
+      "/api/admin/ai-monitor",
+    ],
+  );
+  for (const request of requests)
+    assert.equal(request.options.headers.Authorization, "Bearer test-token");
   assert.equal(requests[2].options.method, "POST");
   assert.equal(requests[5].options.method, "PATCH");
   assert.equal(JSON.parse(requests[5].options.body).enabled, false);
-  assert.equal(requests.some(({ url }) => url.endsWith("/runs")), false);
+  assert.equal(
+    requests.some(({ url }) => url.endsWith("/runs")),
+    false,
+  );
   await client.runAI();
   assert.equal(requests[6].url, "/api/admin/ai-monitor/runs");
   assert.equal(requests[6].options.method, "POST");
-  await assert.rejects(client.candidates({ status: "unknown" }), /valid review status/);
+  await assert.rejects(
+    client.candidates({ status: "unknown" }),
+    /valid review status/,
+  );
 });
 
 test("AI and review errors remain visible without being treated as empty success", async () => {
   for (const operation of ["aiStatus", "saveAISettings", "runAI", "reject"]) {
     const client = createAdminClient("test-token", {
-      fetchImpl: async () => ({ ok: false, status: 409, json: async () => ({ detail: "AI search is disabled on this server." }) }),
+      fetchImpl: async () => ({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: "AI search is disabled on this server." }),
+      }),
     });
-    await assert.rejects(client[operation]({ enabled: false }), /disabled on this server/);
+    await assert.rejects(
+      client[operation]({ enabled: false }),
+      /disabled on this server/,
+    );
   }
-  const unavailable = createAdminClient("test-token", { fetchImpl: async () => { throw new TypeError("Offline"); } });
+  const unavailable = createAdminClient("test-token", {
+    fetchImpl: async () => {
+      throw new TypeError("Offline");
+    },
+  });
   await assert.rejects(unavailable.aiStatus(), /API connection/);
 });
 
 test("AI drafts preserve workbook fields while excluding unreviewed operational fields", () => {
   const draft = candidateDraft({
-    title: "Candidate fallback", summary: "Source summary", sourceUrl: "https://example.invalid/a",
-    proposedFields: { title: "Proposed title", victim_identity: "Fixture port", year: 2025, month: "",
-      yearEnd: null, reference_urls: ["https://example.invalid/a", "https://example.invalid/b"],
-      raw_fields: { "Latitude Longitude": "52, 4" }, status: "published", id: "injected", notification_suppressed: false },
+    title: "Candidate fallback",
+    summary: "Source summary",
+    sourceUrl: "https://example.invalid/a",
+    proposedFields: {
+      title: "Proposed title",
+      victim_identity: "Fixture port",
+      year: 2025,
+      month: "",
+      yearEnd: null,
+      reference_urls: [
+        "https://example.invalid/a",
+        "https://example.invalid/b",
+      ],
+      raw_fields: { "Latitude Longitude": "52, 4" },
+      status: "published",
+      id: "injected",
+      notification_suppressed: false,
+    },
   });
   assert.equal(draft.title, "Proposed title");
   assert.equal(draft.victimIdentity, "Fixture port");
   assert.equal(draft.summary, "Source summary");
   assert.equal(draft.coordinatesRaw, "52, 4");
-  assert.equal(draft.referenceUrlsText, "https://example.invalid/a\nhttps://example.invalid/b");
+  assert.equal(
+    draft.referenceUrlsText,
+    "https://example.invalid/a\nhttps://example.invalid/b",
+  );
   assert.equal(draft.status, undefined);
   assert.equal(draft.id, undefined);
   assert.equal(draft.notificationSuppressed, undefined);
@@ -455,12 +533,25 @@ test("AI drafts preserve workbook fields while excluding unreviewed operational 
 
 test("review payload keeps source precision, multiple references and workbook classification", () => {
   const payload = reviewedIncidentPayload({
-    title: "Reviewed fixture", summary: "Verified source text", year: "2025", month: "9", yearEnd: "2025",
-    qa: "AB", referenceNumber: "20250901", victimTypeShort: "Port", motiveShort: "Unknown",
-    impactShort: "Disruption", referenceShort: "Source (2025)", coordinatesRaw: "52.0, 4.0",
-    latitude: "52", longitude: "4", locationPrecision: "source_provided",
-    sourceUrl: "https://example.invalid/a", referenceUrlsText: "https://example.invalid/a\nhttps://example.invalid/b",
-    id: "not-a-field", status: "published",
+    title: "Reviewed fixture",
+    summary: "Verified source text",
+    year: "2025",
+    month: "9",
+    yearEnd: "2025",
+    qa: "AB",
+    referenceNumber: "20250901",
+    victimTypeShort: "Port",
+    motiveShort: "Unknown",
+    impactShort: "Disruption",
+    referenceShort: "Source (2025)",
+    coordinatesRaw: "52.0, 4.0",
+    latitude: "52",
+    longitude: "4",
+    locationPrecision: "source_provided",
+    sourceUrl: "https://example.invalid/a",
+    referenceUrlsText: "https://example.invalid/a\nhttps://example.invalid/b",
+    id: "not-a-field",
+    status: "published",
   });
   assert.equal(payload.summary, payload.description);
   assert.equal(payload.year, 2025);
@@ -470,9 +561,15 @@ test("review payload keeps source precision, multiple references and workbook cl
   assert.equal(payload.referenceNumber, "20250901");
   assert.equal(payload.victimTypeShort, "Port");
   assert.equal(payload.rawFields["Latitude Longitude"], "52.0, 4.0");
-  assert.deepEqual(payload.referenceUrls, ["https://example.invalid/a", "https://example.invalid/b"]);
+  assert.deepEqual(payload.referenceUrls, [
+    "https://example.invalid/a",
+    "https://example.invalid/b",
+  ]);
   assert.equal(payload.status, undefined);
-  const unmapped = reviewedIncidentPayload({ title: "Only the year is known", year: "2024" });
+  const unmapped = reviewedIncidentPayload({
+    title: "Only the year is known",
+    year: "2024",
+  });
   assert.equal(unmapped.month, undefined);
   assert.equal(unmapped.latitude, null);
   assert.equal(unmapped.locationPrecision, "unknown");
@@ -480,48 +577,116 @@ test("review payload keeps source precision, multiple references and workbook cl
 
 test("review rejects invented date precision, unsafe references and incomplete coordinates", () => {
   for (const values of [
-    { month: "13" }, { month: "1.5" }, { year: "2024.5" }, { year: "2025", yearEnd: "2024" },
-    { latitude: "52" }, { latitude: "91", longitude: "4", locationPrecision: "exact" },
+    { month: "13" },
+    { month: "1.5" },
+    { year: "2024.5" },
+    { year: "2025", yearEnd: "2024" },
+    { latitude: "52" },
+    { latitude: "91", longitude: "4", locationPrecision: "exact" },
     { latitude: "52", longitude: "4", locationPrecision: "unknown" },
-    { sourceUrl: "javascript:alert(1)" }, { referenceUrlsText: "https://example.invalid/a\nfile:///private/data" },
-  ]) assert.throws(() => reviewedIncidentPayload({ title: "Fixture", ...values }));
+    { sourceUrl: "javascript:alert(1)" },
+    { referenceUrlsText: "https://example.invalid/a\nfile:///private/data" },
+  ])
+    assert.throws(() =>
+      reviewedIncidentPayload({ title: "Fixture", ...values }),
+    );
 });
 
 test("implicit form submission during rejection cannot publish or create an incident", async () => {
   const writes = [];
   const client = {
-    approve: async (...args) => { writes.push(["approve", ...args]); return { id: "saved" }; },
-    create: async (...args) => { writes.push(["create", ...args]); return { id: "created" }; },
+    approve: async (...args) => {
+      writes.push(["approve", ...args]);
+      return { id: "saved" };
+    },
+    create: async (...args) => {
+      writes.push(["create", ...args]);
+      return { id: "created" };
+    },
   };
-  const payload = reviewedIncidentPayload({ title: "Synthetic pending report" });
+  const payload = reviewedIncidentPayload({
+    title: "Synthetic pending report",
+  });
   const candidate = { id: "pending-report", status: "pending" };
-  await assert.rejects(submitReviewedIncident(client, { candidate, payload, rejectionOpen: true }), /Complete or cancel rejection/);
-  await assert.rejects(submitReviewedIncident(client, { candidate: null, payload, rejectionOpen: true }), /Complete or cancel rejection/);
+  await assert.rejects(
+    submitReviewedIncident(client, { candidate, payload, rejectionOpen: true }),
+    /Complete or cancel rejection/,
+  );
+  await assert.rejects(
+    submitReviewedIncident(client, {
+      candidate: null,
+      payload,
+      rejectionOpen: true,
+    }),
+    /Complete or cancel rejection/,
+  );
   assert.deepEqual(writes, []);
-  await assert.rejects(submitReviewedIncident(client, { candidate: { ...candidate, status: "rejected" }, payload }), /Only pending reports/);
+  await assert.rejects(
+    submitReviewedIncident(client, {
+      candidate: { ...candidate, status: "rejected" },
+      payload,
+    }),
+    /Only pending reports/,
+  );
   assert.deepEqual(writes, []);
   // Cancelling the rejection restores the explicit publication action.
-  await submitReviewedIncident(client, { candidate, payload, rejectionOpen: false });
+  await submitReviewedIncident(client, {
+    candidate,
+    payload,
+    rejectionOpen: false,
+  });
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], "approve");
   assert.equal(writes[0][1], "pending-report");
 });
 
 test("review preserves evidence metadata only for sources retained by the reviewer", () => {
-  const draft = candidateDraft({ title: "Fixture", sourceUrl: "https://example.invalid/a", proposedFields: {
-    referenceUrls: ["https://example.invalid/a", "https://second.invalid/b"],
-    sources: [
-      { url: "https://example.invalid/a", short_name: "Source A", raw_text: "Original evidence excerpt A.", secret: "do not forward" },
-      { url: "https://second.invalid/b", shortName: "Source B", rawText: "Original evidence excerpt B." },
-    ],
-  } });
+  const draft = candidateDraft({
+    title: "Fixture",
+    sourceUrl: "https://example.invalid/a",
+    proposedFields: {
+      referenceUrls: ["https://example.invalid/a", "https://second.invalid/b"],
+      sources: [
+        {
+          url: "https://example.invalid/a",
+          short_name: "Source A",
+          raw_text: "Original evidence excerpt A.",
+          secret: "do not forward",
+        },
+        {
+          url: "https://second.invalid/b",
+          shortName: "Source B",
+          rawText: "Original evidence excerpt B.",
+        },
+      ],
+    },
+  });
   // The reviewer removes A from both the primary URL and the reference list.
-  const payload = reviewedIncidentPayload({ ...draft, sourceUrl: "https://SECOND.invalid/b#section", referenceUrlsText: "https://second.invalid/b\nhttps://manual.invalid/new" });
+  const payload = reviewedIncidentPayload({
+    ...draft,
+    sourceUrl: "https://SECOND.invalid/b#section",
+    referenceUrlsText: "https://second.invalid/b\nhttps://manual.invalid/new",
+  });
   assert.equal(payload.sources.length, 1);
-  assert.ok(payload.sources.every((source) => source.shortName === "Source B" && source.rawText === "Original evidence excerpt B."));
-  assert.ok(payload.sources.every((source) => !Object.hasOwn(source, "secret")));
-  assert.ok(payload.sources.every((source) => !source.url.includes("example.invalid/a")));
-  const manual = reviewedIncidentPayload({ title: "Manual fixture", referenceUrlsText: "https://manual.invalid/new" });
+  assert.ok(
+    payload.sources.every(
+      (source) =>
+        source.shortName === "Source B" &&
+        source.rawText === "Original evidence excerpt B.",
+    ),
+  );
+  assert.ok(
+    payload.sources.every((source) => !Object.hasOwn(source, "secret")),
+  );
+  assert.ok(
+    payload.sources.every(
+      (source) => !source.url.includes("example.invalid/a"),
+    ),
+  );
+  const manual = reviewedIncidentPayload({
+    title: "Manual fixture",
+    referenceUrlsText: "https://manual.invalid/new",
+  });
   assert.equal(manual.sources, undefined);
   assert.deepEqual(manual.referenceUrls, ["https://manual.invalid/new"]);
 });
@@ -536,24 +701,52 @@ test("public detail keeps normalized fields visible beside AI provenance or part
     logLevel: "silent",
   });
   try {
-    const { IncidentDetails } = await server.ssrLoadModule("/src/components/IncidentDetails.jsx");
-    const incident = record({ qa: "AB", referenceNumber: "fixture-ref", month: "9", yearEnd: 2024,
-      victimTypeShort: "Port", method: "Navigation interference", motiveShort: "Unknown motive",
-      impactShort: "Brief disruption", referenceShort: "Fixture citation",
-      rawFields: { _aiReview: { evidence: {} } } });
-    const internalOnly = renderToStaticMarkup(createElement(IncidentDetails, { incident }));
+    const { IncidentDetails } = await server.ssrLoadModule(
+      "/src/components/IncidentDetails.jsx",
+    );
+    const incident = record({
+      qa: "AB",
+      referenceNumber: "fixture-ref",
+      month: "9",
+      yearEnd: 2024,
+      victimTypeShort: "Port",
+      method: "Navigation interference",
+      motiveShort: "Unknown motive",
+      impactShort: "Brief disruption",
+      referenceShort: "Fixture citation",
+      rawFields: { _aiReview: { evidence: {} } },
+    });
+    const internalOnly = renderToStaticMarkup(
+      createElement(IncidentDetails, { incident }),
+    );
     assert.match(internalOnly, /Navigation interference/);
     assert.match(internalOnly, /fixture-ref/);
     assert.match(internalOnly, /Brief disruption/);
     assert.match(internalOnly, /Fixture citation/);
     assert.doesNotMatch(internalOnly, /Original record/);
-    const partial = renderToStaticMarkup(createElement(IncidentDetails, { incident: { ...incident, rawFields: { _aiReview: {}, "Latitude Longitude": "52,4" } } }));
+    const partial = renderToStaticMarkup(
+      createElement(IncidentDetails, {
+        incident: {
+          ...incident,
+          rawFields: { _aiReview: {}, "Latitude Longitude": "52,4" },
+        },
+      }),
+    );
     assert.match(partial, /Navigation interference/);
     assert.match(partial, /Original record/);
     assert.match(partial, /52,4/);
-    const original = renderToStaticMarkup(createElement(IncidentDetails, { incident: { ...incident, rawFields: { Method: "Navigation interference" } } }));
+    const original = renderToStaticMarkup(
+      createElement(IncidentDetails, {
+        incident: {
+          ...incident,
+          rawFields: { Method: "Navigation interference" },
+        },
+      }),
+    );
     assert.equal(original.match(/Navigation interference/g).length, 1);
-  } finally { await server.close(); }
+  } finally {
+    await server.close();
+  }
 });
 
 test("clusters keep co-located incidents distinct and exclude only unmapped records", () => {
@@ -621,4 +814,267 @@ test("workbook import rejects wrong type, empty and oversized files before a req
     }),
     /10 MB/,
   );
+});
+
+test("related candidates cannot use ordinary publication", async () => {
+  const writes = [];
+  const client = {
+    approve: async (...args) => writes.push(["approve", ...args]),
+    create: async (...args) => writes.push(["create", ...args]),
+  };
+  const payload = { title: "Reviewed report" };
+  const base = { id: "candidate-test", status: "pending" };
+
+  for (const fields of [
+    { relationshipType: "possible_update" },
+    { relationshipType: "possible_duplicate" },
+    { relatedIncidentId: "existing-incident" },
+    { relationshipType: "unknown-value" },
+  ]) {
+    await assert.rejects(
+      submitReviewedIncident(client, {
+        candidate: { ...base, ...fields },
+        payload,
+      }),
+      /relationship.*existing incidents/i,
+    );
+  }
+
+  assert.deepEqual(writes, []);
+
+  // Ordinary candidates and manual creation must still work.
+  for (const relationshipType of ["unclassified", "new_incident"]) {
+    await submitReviewedIncident(client, {
+      candidate: { ...base, relationshipType },
+      payload,
+    });
+  }
+  await submitReviewedIncident(client, { candidate: null, payload });
+
+  assert.deepEqual(
+    writes.map(([action]) => action),
+    ["approve", "approve", "create"],
+  );
+});
+
+test("candidate relationship displays the explanation and incident link", async () => {
+  const { createServer } = await import("vite");
+  const server = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, hmr: false, watch: null },
+    appType: "custom",
+    esbuild: { jsx: "automatic" },
+    logLevel: "silent",
+  });
+
+  try {
+    const { CandidateRelationship } = await server.ssrLoadModule(
+      "/src/components/CandidateRelationship.jsx",
+    );
+    const html = renderToStaticMarkup(
+      createElement(CandidateRelationship, {
+        candidate: {
+          relationshipType: "possible_update",
+          relatedIncidentId: "incident-test",
+          relationshipReason: "Same event with additional reporting.",
+        },
+      }),
+    );
+
+    assert.match(html, /Possible update/);
+    assert.match(html, /Same event with additional reporting/);
+    assert.match(html, /href="\/\?incident=incident-test"/);
+    assert.match(html, /not a confirmed match/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("incident update client preserves versions and sends explicit changes", async () => {
+  const calls = [];
+  const version = "2026-11-22T12:30:00.123456";
+
+  const client = createAdminClient("test-token", {
+    baseUrl: "/api",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+
+      if (url === "/api/incidents") {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{ id: "incident/one", title: "Test incident" }],
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          id: "incident/one",
+          reviewVersion: version,
+        }),
+      };
+    },
+  });
+
+  const records = await client.incidents();
+  assert.equal(records[0].id, "incident/one");
+
+  const incident = await client.incident("incident/one");
+  assert.equal(incident.reviewVersion, version);
+
+  const update = {
+    incidentId: incident.id,
+    reviewVersion: incident.reviewVersion,
+    confirmation: { incidentId: incident.id, reviewVersion: incident.reviewVersion },
+    reason: "Reviewed source confirms the impact.",
+    changes: {
+      impact: "Three-day shutdown.",
+      sources: [{ url: "https://example.invalid/report" }],
+    },
+  };
+  await client.applyUpdate("candidate/one", update);
+
+  assert.deepEqual(
+    calls.map(({ url, options }) => [url, options.method]),
+    [
+      ["/api/incidents", "GET"],
+      ["/api/incidents/incident%2Fone", "GET"],
+      ["/api/admin/candidates/candidate%2Fone/apply-update", "POST"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(calls[2].options.body), update);
+  assert.ok(
+    calls.every(
+      ({ options }) => options.headers.Authorization === "Bearer test-token",
+    ),
+  );
+});
+
+test("incident updates include only selected nonblank changed fields", () => {
+  const incident = {
+    title: "Port X incident",
+    summary: "Original summary.",
+    impact: "Original impact.",
+    affectedSystem: "Navigation",
+    victimCountry: "Netherlands",
+  };
+  const draft = {
+    title: "Port X incident",
+    summary: "Reviewed summary.",
+    impact: "Reviewed impact.",
+    affectedSystem: "   ",
+    victimCountry: "Belgium",
+  };
+
+  const options = incidentUpdateOptions(incident, draft);
+
+  assert.deepEqual(
+    options.map(({ key }) => key),
+    ["summary", "impact"],
+  );
+  assert.equal(options[0].current, "Original summary.");
+  assert.equal(options[0].proposed, "Reviewed summary.");
+
+  assert.deepEqual(selectedIncidentChanges(incident, draft, ["impact"]), {
+    impact: "Reviewed impact.",
+  });
+  assert.deepEqual(selectedIncidentChanges(incident, draft, ["summary"]), {
+    summary: "Reviewed summary.",
+  });
+  assert.deepEqual(selectedIncidentChanges(incident, draft, []), {});
+
+  assert.throws(
+    () => selectedIncidentChanges(incident, draft, ["affectedSystem"]),
+    /no longer available/,
+  );
+  assert.throws(
+    () => selectedIncidentChanges(incident, draft, ["victimCountry"]),
+    /no longer available/,
+  );
+
+  // Preparing changes must not modify the original record.
+  assert.equal(incident.summary, "Original summary.");
+  assert.equal(incident.impact, "Original impact.");
+  assert.equal(incident.victimCountry, "Netherlands");
+});
+
+test("update sources preserve evidence and exclude unsafe repeated links", () => {
+  const draft = {
+    sourceUrl: "https://example.com/report",
+    referenceUrlsText: [
+      "https://example.com/report#section",
+      "https://example.org/second",
+      "javascript:alert(1)",
+      "https://user:password@example.net/private",
+    ].join("\n"),
+    referenceSources: [
+      {
+        url: "https://example.com/report",
+        shortName: "Original reporting",
+        rawText: "Evidence reviewed by the researcher.",
+      },
+    ],
+  };
+
+  const sources = incidentUpdateSources(draft);
+
+  assert.deepEqual(sources, [
+    {
+      url: "https://example.com/report",
+      shortName: "Original reporting",
+      rawText: "Evidence reviewed by the researcher.",
+    },
+    {
+      url: "https://example.org/second",
+      shortName: "",
+      rawText: "",
+    },
+  ]);
+
+  assert.deepEqual(incidentUpdateSources({}), []);
+  assert.equal(
+    draft.referenceSources[0].rawText,
+    "Evidence reviewed by the researcher.",
+  );
+});
+
+test("review conflicts retain the API code for reload and compare", async () => {
+  const client = createAdminClient("test-token", {
+    fetchImpl: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ code: "stale_target", detail: "Reload and compare." }),
+    }),
+  });
+  await assert.rejects(
+    client.applyUpdate("report", {}),
+    { code: "stale_target", message: "Reload and compare." },
+  );
+});
+
+test("the update picker includes structured-only sources and keeps recorded evidence across URL variants", () => {
+  const draft = {
+    sourceUrl: "https://EXAMPLE.invalid/report#intro",
+    referenceSources: [
+      { url: "https://example.invalid/report", shortName: "Report", rawText: "Report excerpt" },
+      { url: "https://example.invalid/structured", shortName: "Structured only", rawText: "Additional evidence" },
+    ],
+  };
+  const incident = {
+    sources: [{ url: "https://example.invalid:443/report#archive", shortName: "Recorded report", rawText: "Earlier evidence" }],
+  };
+  assert.deepEqual(incidentUpdateSources(draft, incident), [
+    { url: "https://example.invalid/report", shortName: "Recorded report", rawText: "Earlier evidence" },
+    { url: "https://example.invalid/structured", shortName: "Structured only", rawText: "Additional evidence" },
+  ]);
+  assert.equal(incidentUpdateSources(draft)[0].rawText, "Report excerpt");
+});
+
+test("the update picker treats an explicit HTTP default port as the recorded source", () => {
+  assert.deepEqual(incidentUpdateSources(
+    { sourceUrl: "http://example.invalid:80/report" },
+    { sources: [{ url: "http://example.invalid/report", shortName: "Recorded", rawText: "Earlier evidence" }] },
+  ), [{ url: "http://example.invalid/report", shortName: "Recorded", rawText: "Earlier evidence" }]);
 });

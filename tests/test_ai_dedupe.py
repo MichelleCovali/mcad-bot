@@ -100,6 +100,69 @@ class ResearchDeduplication(unittest.TestCase):
             self.assertTrue(any("distinct event" in item for item in candidate.evidence["uncertainties"]))
             self.assertEqual(candidate.source_url, "https://newsroom.example.net/new-corroboration")
 
+    def test_matching_incident_with_new_sources_is_saved_as_possible_update(self):
+        from mcad.models import (
+            CandidateDelivery, CandidateNotification, Subscriber
+        )
+
+        with self.factory.begin() as session:
+            incident = Incident(
+                title="Port X cyberattack",
+                year=2026,
+                summary="Original reviewed information.",
+                source_url="https://authority.example.org/original",
+            )
+            session.add(incident)
+            session.add(Subscriber(chat_id="123456", active=True))
+            session.flush()
+            incident_id = incident.id
+
+        proposal = self.proposal(
+            title="  PORT X CYBERATTACK  ",
+            year=2026,
+        )
+        result = self.persist(proposal)
+
+        self.assertEqual(result["candidatesCreated"], 1)
+
+        with self.factory() as session:
+            candidate = session.scalar(select(Candidate))
+            self.assertEqual(
+                candidate.relationship_type, "possible_update"
+            )
+            self.assertEqual(
+                candidate.related_incident_id, incident_id
+            )
+            self.assertTrue(candidate.relationship_reason)
+            self.assertEqual(candidate.status, "pending")
+            self.assertIsNone(candidate.incident_id)
+            self.assertEqual(
+                candidate.verification_status, "needs_review"
+            )
+            self.assertEqual(
+                candidate.evidence["assessment"], "needs_review"
+            )
+
+            incident = session.get(Incident, incident_id)
+            self.assertEqual(
+                incident.summary, "Original reviewed information."
+            )
+            self.assertEqual(
+                session.scalar(select(func.count()).select_from(Incident)),
+                1,
+            )
+            for model in (
+                CandidateNotification, CandidateDelivery, OutboxEvent
+            ):
+                self.assertEqual(
+                    session.scalar(select(func.count()).select_from(model)),
+                    0,
+                )
+
+        # Seeing the same sources again must not create another candidate.
+        repeated = self.persist(proposal)
+        self.assertEqual(repeated["candidatesCreated"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

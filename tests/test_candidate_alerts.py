@@ -28,6 +28,10 @@ class FakeClient:
         return self.results.pop(0) if self.results else SendResult(True, message_id="fixture-message")
 
 
+    def send_with_review(self, chat_id, text, _markup):
+        return self.send(chat_id, text)
+
+
 class CandidateAlerts(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -227,3 +231,89 @@ class CandidateAlerts(unittest.TestCase):
             controller.stopped.wait = lambda _seconds: controller.stopped.set()
             controller._delivery_loop()
             send_candidate.assert_called_once()
+
+    def test_related_candidates_do_not_create_alerts(self):
+        self.subscribe()
+
+        with self.factory.begin() as session:
+            incident = Incident(title="Existing incident")
+            session.add(incident)
+            session.flush()
+            incident_id = incident.id
+
+        variants = [
+            {"relationship_type": "possible_update"},
+            {"relationship_type": "possible_duplicate"},
+            {"related_incident_id": incident_id},
+        ]
+
+        for index, fields in enumerate(variants):
+            with self.subTest(fields=fields):
+                self.create(
+                    source_url=f"https://example.invalid/related-{index}",
+                    **fields,
+                )
+
+        self.assertEqual(self.count(Candidate), 3)
+        self.assertEqual(self.count(CandidateNotification), 0)
+        self.assertEqual(self.count(CandidateDelivery), 0)
+
+    def test_related_candidates_can_generate_private_review_alerts_only(self):
+        self.subscribe()
+        for relationship in ("possible_update", "possible_duplicate"):
+            with self.factory.begin() as session:
+                candidate = Candidate(
+                    title="Fictional related report", origin="ai", status="pending",
+                    source_url=f"https://example.invalid/{relationship}",
+                    verification_status="needs_review", relationship_type=relationship,
+                )
+                session.add(candidate)
+                self.assertIsNone(create_candidate_notification(session, candidate))
+                notice = create_candidate_notification(session, candidate, review_chat_id="654321")
+                self.assertEqual(notice.payload["reviewChatId"], "654321")
+
+        client = FakeClient()
+        self.assertTrue(deliver_candidate_one(self.factory, client, review_chat_id="654321"))
+        self.assertTrue(deliver_candidate_one(self.factory, client, review_chat_id="654321"))
+        self.assertEqual([call[0] for call in client.calls], ["654321", "654321"])
+
+    def test_relationship_change_cancels_queued_alert(self):
+        self.subscribe()
+
+        with self.factory.begin() as session:
+            incident = Incident(title="Existing incident")
+            session.add(incident)
+            session.flush()
+            incident_id = incident.id
+
+        variants = [
+            {"relationship_type": "possible_update"},
+            {"relationship_type": "possible_duplicate"},
+            {"related_incident_id": incident_id},
+        ]
+
+        client = FakeClient()
+
+        for index, fields in enumerate(variants):
+            with self.subTest(fields=fields):
+                candidate_id = self.create(
+                    source_url=f"https://example.invalid/queued-{index}"
+                )
+
+                with self.factory.begin() as session:
+                    candidate = session.get(Candidate, candidate_id)
+                    for key, value in fields.items():
+                        setattr(candidate, key, value)
+
+                self.assertTrue(
+                    deliver_candidate_one(self.factory, client)
+                )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(self.count(CandidateDelivery), 3)
+
+        with self.factory() as session:
+            deliveries = list(session.scalars(select(CandidateDelivery)))
+            self.assertTrue(
+                all(item.status == "cancelled" for item in deliveries)
+            )
