@@ -235,6 +235,54 @@ def upsert_incident(session, payload, external_id=None, notify=False, import_bat
     session.flush()
     return incident, created
 
+def merge_incident_sources(incident, new_sources):
+    """Combine sources without removing earlier evidence."""
+    if not isinstance(new_sources, list):
+        raise ValueError("New sources must be a list.")
+
+    merged = {
+        source.url: {
+            "url": source.url,
+            "short_name": source.short_name,
+            "raw_text": source.raw_text,
+        }
+        for source in incident.sources
+    }
+
+    # Preserve the main reference even if it is not in the source list.
+    if incident.source_url and incident.source_url not in merged:
+        merged[incident.source_url] = {
+            "url": incident.source_url,
+            "short_name": incident.reference_short or "",
+            "raw_text": "",
+        }
+
+    for source in new_sources:
+        if not isinstance(source, dict):
+            raise ValueError("Each new source must be an object.")
+
+        url = safe_url(source.get("url"))
+        if not url:
+            raise ValueError("Each new source requires a URL.")
+
+        short_name = source.get(
+            "short_name", source.get("shortName", "")
+        )
+        raw_text = source.get(
+            "raw_text", source.get("rawText", "")
+        )
+        if not isinstance(short_name, str) or not isinstance(raw_text, str):
+            raise ValueError("Source names and excerpts must be text.")
+
+        # Keep existing metadata when this URL is already recorded.
+        if url not in merged:
+            merged[url] = {
+                "url": url,
+                "short_name": short_name,
+                "raw_text": raw_text,
+            }
+
+    return list(merged.values())
 
 def update_incident(session, incident, payload):
     values = normalize_payload(payload, existing=incident)

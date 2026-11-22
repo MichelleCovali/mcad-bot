@@ -87,3 +87,56 @@ def test_revision_migration_preserves_existing_records(monkeypatch):
             )
     finally:
         engine.dispose()
+
+def test_merge_sources_preserves_existing_evidence():
+    from types import SimpleNamespace
+    from mcad.service import merge_incident_sources
+
+    incident = SimpleNamespace(
+        source_url="https://example.com/main",
+        reference_short="Original main reference",
+        sources=[
+            SimpleNamespace(
+                url="https://example.com/earlier",
+                short_name="Earlier source",
+                raw_text="Original evidence excerpt.",
+            )
+        ],
+    )
+
+    result = merge_incident_sources(incident, [
+        {
+            "url": "https://example.com/earlier",
+            "shortName": "Changed name",
+            "rawText": "Different excerpt.",
+        },
+        {
+            "url": "https://example.com/new",
+            "shortName": "New source",
+            "rawText": "New supporting evidence.",
+        },
+        {
+            "url": "https://example.com/new",
+            "shortName": "Repeated source",
+            "rawText": "Repeated evidence.",
+        },
+    ])
+
+    by_url = {source["url"]: source for source in result}
+
+    assert len(result) == 3
+    assert by_url["https://example.com/earlier"] == {
+        "url": "https://example.com/earlier",
+        "short_name": "Earlier source",
+        "raw_text": "Original evidence excerpt.",
+    }
+    assert by_url["https://example.com/main"]["short_name"] == (
+        "Original main reference"
+    )
+    assert by_url["https://example.com/new"]["raw_text"] == (
+        "New supporting evidence."
+    )
+
+    # Preparing the combined list must not change the original.
+    assert len(incident.sources) == 1
+    assert incident.sources[0].raw_text == "Original evidence excerpt."
