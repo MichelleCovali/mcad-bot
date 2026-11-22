@@ -1,6 +1,6 @@
 """Versioned schema migrations; never change an already deployed migration."""
 
-from sqlalchemy import select, text
+from sqlalchemy import inspect, select, text
 
 from mcad.models import SchemaVersion, utcnow
 from .v0001_initial import upgrade as initial_schema
@@ -11,6 +11,8 @@ from .v0005_admin_accounts import upgrade as admin_accounts
 from .v0006_telegram_learning import upgrade as telegram_learning
 from .v0007_discovery_operations import upgrade as discovery_operations
 from .v0008_editorial_learning import upgrade as editorial_learning
+from .v0009_integrated_candidate_relationships import upgrade as integrated_relationships
+from .v0006_incident_revisions import upgrade as incident_revisions
 
 MIGRATIONS = [
     (1, initial_schema),
@@ -21,6 +23,8 @@ MIGRATIONS = [
     (6, telegram_learning),
     (7, discovery_operations),
     (8, editorial_learning),
+    (9, integrated_relationships),
+    (10, incident_revisions),
 ]
 
 def migrate(engine):
@@ -29,6 +33,15 @@ def migrate(engine):
             connection.execute(text("SELECT pg_advisory_xact_lock(681223941)"))
         SchemaVersion.__table__.create(connection, checkfirst=True)
         applied = set(connection.execute(select(SchemaVersion.version)).scalars())
+        # The feature branch used 5/6 for different schema changes. Restore the
+        # missing main steps before v8 can depend on Telegram learning tables.
+        if {5, 6} & applied and "relationship_type" in {
+            column["name"] for column in inspect(connection).get_columns("candidates")
+        }:
+            if 5 in applied and not inspect(connection).has_table("admin_users"):
+                admin_accounts(connection)
+            if 6 in applied and not inspect(connection).has_table("telegram_feedback"):
+                telegram_learning(connection)
         for version, upgrade in MIGRATIONS:
             if version not in applied:
                 upgrade(connection)

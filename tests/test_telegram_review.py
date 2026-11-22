@@ -181,7 +181,7 @@ def test_telegram_updates_the_existing_incident_instead_of_publishing_a_duplicat
         incident, _ = upsert_incident(session, {"title": "Existing test port incident", "summary": "Original outage.",
             "sourceUrl": "https://archives.example/initial"})
         incident_id = incident.id
-    prepare(factory, suggested_id=incident_id)
+    candidate_id = prepare(factory, suggested_id=incident_id)
     bot = send_review(factory)
     assert "Existing test port incident" in bot.reviews[0][1]
     assert "Cargo bookings resumed" in bot.reviews[0][1]
@@ -192,6 +192,11 @@ def test_telegram_updates_the_existing_incident_instead_of_publishing_a_duplicat
         assert incident.id == incident_id
         assert incident.summary == "Original outage."
         assert incident.raw_fields["_incidentUpdates"][0]["summary"] == "Cargo bookings resumed after the disruption."
+        from mcad.models import IncidentRevision
+        revision = session.scalar(select(IncidentRevision).where(IncidentRevision.candidate_id == candidate_id))
+        assert revision.incident_id == incident_id
+        assert revision.before_snapshot.get("updates", []) == []
+        assert revision.after_snapshot["updates"][0]["summary"] == "Cargo bookings resumed after the disruption."
     assert not deliver_one(factory, bot)
 
 

@@ -1,12 +1,13 @@
 """Publish or reject a report inside the caller's database transaction."""
 import ipaddress
+import json
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from .models import Candidate, Incident, utcnow
-from .service import IncidentAlreadyExists, iso, normalize_payload, safe_url, update_incident, upsert_incident
+from .models import Candidate, Incident, IncidentRevision, IncidentSource, utcnow
+from .service import IncidentAlreadyExists, ReviewConflict, incident_dict, iso, merge_incident_sources, normalize_payload, safe_url, update_incident, upsert_incident
 
 
 REJECTION_REASONS = {
@@ -253,21 +254,35 @@ def _append_incident_update(session, candidate, target_id, values, sources, *, v
         entry["aiReview"] = _ai_review(candidate)
     raw["_incidentUpdates"] = [*updates, entry]
 
-    retained = {source.url: {"url": source.url, "short_name": source.short_name, "raw_text": source.raw_text}
-                for source in incident.sources}
-    for url, source in sources.items():
-        retained.setdefault(url, source)
-    if incident.source_url:
-        retained.setdefault(incident.source_url, {"url": incident.source_url})
-    return update_incident(session, incident, {"raw_fields": raw, "sources": list(retained.values())})
+    before = json.loads(json.dumps(incident_dict(incident, details=True)))
+    recorded_urls = {source.url for source in incident.sources}
+    retained = merge_incident_sources(incident, [
+        {**source, "url": url} for url, source in sources.items()
+    ])
+    incident.sources.extend(IncidentSource(**source) for source in retained
+                            if source["url"] not in recorded_urls)
+    update_incident(session, incident, {"raw_fields": raw})
+    session.add(IncidentRevision(
+        incident_id=incident.id, candidate_id=candidate.id,
+        reason="Corroborated development approved in Telegram." if via_telegram
+               else "Corroborated development approved in the review workspace.",
+        before_snapshot=before,
+        after_snapshot=json.loads(json.dumps(incident_dict(incident, details=True))),
+        evidence={"reviewedUpdateSources": supporting_urls, "reportEvidence": _evidence(candidate)},
+    ))
+    return incident
 
 
 def approve_candidate(session, candidate_id, payload, *, via_telegram=False):
     candidate = _load_candidate(session, candidate_id)
     if candidate.status == "approved" and candidate.incident_id:
+        if candidate.relationship_type == "update" and not via_telegram and not payload.get("updateIncidentId"):
+            raise ReviewConflict("report_resolved", "This report was already applied as an update to an existing incident.")
         return session.get(Incident, candidate.incident_id)
     if candidate.status != "pending":
-        raise HTTPException(409, "This report has already been reviewed.")
+        if via_telegram:
+            raise HTTPException(409, "This report has already been reviewed.")
+        raise ReviewConflict("report_resolved", "This report has already been reviewed.")
 
     content = dict(payload)
     target_id = content.pop("updateIncidentId", None)
@@ -277,6 +292,10 @@ def approve_candidate(session, candidate_id, payload, *, via_telegram=False):
     distinct = content.pop("distinctIncidentConfirmed", False)
     suggested = _suggested_incident(candidate)
     material = _material_update(candidate)
+    needs_relationship_review = (
+        candidate.relationship_type in {"possible_update", "possible_duplicate"}
+        or candidate.related_incident_id is not None
+    )
     if via_telegram:
         if not can_approve_from_telegram(candidate) or target_id != suggested:
             raise HTTPException(422, "Confirm the sources and incident in the web review queue before publishing.")
@@ -284,6 +303,8 @@ def approve_candidate(session, candidate_id, payload, *, via_telegram=False):
         if material:
             values["summary"] = material.get("summary") or ""
     else:
+        if needs_relationship_review and not target_id:
+            raise HTTPException(409, "Review the suggested relationship before publishing a separate incident.")
         if (suggested or material) and not target_id and distinct is not True:
             raise HTTPException(422, "Choose the existing incident or confirm that this is a separate event.")
         values = normalize_payload(content)
@@ -296,6 +317,8 @@ def approve_candidate(session, candidate_id, payload, *, via_telegram=False):
 
     if target_id:
         incident = _append_incident_update(session, candidate, target_id, values, sources, via_telegram=via_telegram)
+        candidate.relationship_type = "update"
+        candidate.related_incident_id = incident.id
     else:
         values["status"] = "published"
         if candidate.origin == "ai":

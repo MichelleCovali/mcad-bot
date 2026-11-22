@@ -70,6 +70,14 @@ Administration requires a signed-in account with the appropriate role, or the op
 - `POST /api/admin/candidates/{id}/reject` stores a rejection reason and optional
   notes. Only pending candidates can be approved or rejected; rejected candidates
   cannot be published by a stale client.
+- `POST /api/admin/candidates/{id}/apply-update` applies a reviewed change to
+  one published incident. Send `incidentId`, its detail response's `reviewVersion`,
+  a `confirmation` containing those same two values, a `reason`, and `changes`
+  with selected `sources` and optional reviewed text fields. A stale target or
+  resolved report returns HTTP 409 with a machine-readable `code`. Successful
+  updates preserve evidence, record one revision, and queue no alert.
+- `GET /api/admin/incidents/{id}/revisions` returns timestamps, reasons, changed
+  values, and added source URLs for a published incident, newest revision first.
 - `GET /api/admin/catalogs` returns workbook source fields and imported catalogs.
 - `GET /api/admin/ai-monitor` returns paused status, saved settings and run history.
 - `PATCH /api/admin/ai-monitor` saves settings without running a search. Enabling

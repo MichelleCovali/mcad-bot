@@ -232,10 +232,11 @@ async function requestJson(
       throw new Error(
         "Administrator access was denied. Check your access token.",
       );
-    let detail;
+    let detail, code;
     try {
       const json = await response.json();
       detail = typeof json.detail === "string" ? json.detail : null;
+      code = json.code;
     } catch {
       /* keep bounded generic HTTP error */
     }
@@ -243,6 +244,7 @@ async function requestJson(
       detail || `The incidents API returned HTTP ${response.status}.`,
     );
     failure.status = response.status;
+    failure.code = code;
     throw failure;
   }
   try {
@@ -340,12 +342,34 @@ function adminMethods(request) {
     candidates: async ({ signal, status = "pending" } = {}) => {
       if (!["pending", "rejected", "approved", "all"].includes(status))
         throw new Error("Choose a valid review status.");
-      const suffix = status === "pending" ? "" : `?status=${encodeURIComponent(status)}`;
+      const suffix =
+        status === "pending" ? "" : `?status=${encodeURIComponent(status)}`;
       const payload = await request(`/admin/candidates${suffix}`, { signal });
       return Array.isArray(payload) ? payload : (payload.items ?? []);
     },
+    incidents: async ({ signal } = {}) => {
+      const payload = await request("/incidents", { signal });
+      return Array.isArray(payload) ? payload : (payload.items ?? []);
+    },
+    incident: (id, { signal } = {}) =>
+      request(`/incidents/${encodeURIComponent(id)}`, { signal }),
+    revisions: (incidentId, { signal } = {}) =>
+      request(`/admin/incidents/${encodeURIComponent(incidentId)}/revisions`, { signal }),
+    applyUpdate: (candidateId, update) =>
+      request(
+        `/admin/candidates/${encodeURIComponent(candidateId)}/apply-update`,
+        {
+          method: "POST",
+          body: update,
+        },
+      ),
     catalogs: ({ signal } = {}) => request("/admin/catalogs", { signal }),
-    candidate: (id) => request(`/admin/candidates/${encodeURIComponent(id)}`),
+    candidate: (id, { signal } = {}) => request(`/admin/candidates/${encodeURIComponent(id)}`, { signal }),
+    resolveRelationship: (id, decision, reason) =>
+      request(`/admin/candidates/${encodeURIComponent(id)}/relationship`, {
+        method: "POST",
+        body: { decision, reason },
+      }),
     telegramStatus: ({ signal } = {}) => request("/admin/telegram", { signal }),
     testTelegram: () => request("/admin/telegram/test", { method: "POST" }),
     aiStatus: ({ signal } = {}) => request("/admin/ai-monitor", { signal }),
