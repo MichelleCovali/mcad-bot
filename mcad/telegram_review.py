@@ -113,7 +113,7 @@ def review_notification(candidate, delivery_id, base_url="", incident_title=None
     if pair:
         text += "\n\nCheck both independent sources and the description before accepting."
     else:
-        text += "\n\nConfirm the independent sources or resolve the match in MCAD before accepting."
+        text += "\n\nFurther verification required. Confirm the independent sources and incident match in MCAD before accepting."
 
     actions = []
     if pair:

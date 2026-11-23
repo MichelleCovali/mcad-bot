@@ -302,6 +302,7 @@ class AIRun(Base):
     response_ids: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stages: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    coverage: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     skipped_leads: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     prompt_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 

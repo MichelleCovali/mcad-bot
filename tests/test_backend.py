@@ -210,7 +210,9 @@ class ApiBehaviour(BackendCase):
         self.assertEqual(listing["meta"]["mapped"], 1)
         self.assertEqual(listing["meta"]["unmapped"], 1)
         self.assertEqual(self.client.get(f"/api/incidents/{identifier}").json()["rawFields"]["Original"], "Retained")
-        self.client.patch(f"/api/incidents/{identifier}", json={"title": "Edited fixture"}, headers=self.auth)
+        edited = self.client.patch(f"/api/incidents/{identifier}", json={"title": "Edited fixture",
+            "independentSourcesConfirmed": True}, headers=self.auth)
+        self.assertEqual(edited.status_code, 200)
         self.assertEqual(self.count(OutboxEvent), 2)
 
     def test_candidate_approval_is_explicit_and_idempotent(self):

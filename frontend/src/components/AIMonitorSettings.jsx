@@ -13,6 +13,83 @@ function readableDate(value) {
   return Number.isNaN(date.valueOf()) ? "Unknown date" : date.toLocaleString();
 }
 
+function readableUTCDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "Unknown date" : `${date.toLocaleString(undefined, { timeZone: "UTC" })} UTC`;
+}
+
+function recordedCount(value) {
+  return Number.isInteger(value) && value >= 0 ? value : "—";
+}
+
+function recordedText(values) {
+  return Array.isArray(values) ? values.filter((value) => typeof value === "string" && value.trim()) : [];
+}
+
+const passNames = { primary: "Primary search", gap_check: "Follow-up search for omissions" };
+const passStatuses = {
+  pending: "Not started", running: "In progress", completed: "Completed",
+  failed: "Failed", skipped_budget: "Not performed: tool budget",
+  reused: "Reused saved search; no new web discovery",
+};
+const verificationStatuses = {
+  pending: "Not started", running: "In progress", completed: "Completed",
+  not_needed: "No candidates required verification", failed: "Failed",
+};
+
+function SearchQueries({ queries }) {
+  const recorded = recordedText(queries);
+  return recorded.length ? <ul>{recorded.map((query, index) => <li key={`${index}-${query}`}>{query}</li>)}</ul>
+    : <p className="workspace-muted">No individual search queries were recorded.</p>;
+}
+
+export function DailySearchCoverage({ coverage }) {
+  if (!coverage) return <section aria-label="Daily search checks">
+    <h3>Daily search checks (UTC)</h3>
+    <p className="workspace-muted">Search-check records are unavailable for earlier runs.</p>
+  </section>;
+  const queries = recordedText(coverage.queries);
+  return <section aria-label="Daily search checks">
+    <h3>Daily search checks (UTC){coverage.dateUTC ? ` · ${coverage.dateUTC}` : ""}</h3>
+    <div className="workspace-stats">
+      {[["Two-pass sweeps completed", coverage.sweepRunsCompleted],
+        ["Incomplete attempts", coverage.runsIncomplete],
+        ["Drafts awaiting source checks", coverage.pendingVerification],
+        ["Source-supported drafts", coverage.confirmedReports]].map(([label, value]) =>
+        <div className="workspace-card workspace-stat" key={label}><p>{label}</p><strong>{recordedCount(value)}</strong></div>)}
+    </div>
+    <p className="admin-help">Search checks show the work performed; they cannot guarantee that every maritime cyber incident has been found. Confirmation requires at least two independent sources. Copied reports count as one.</p>
+    <p className="workspace-muted">Latest recorded check: {readableUTCDate(coverage.latestCheckedAt)}.</p>
+    {coverage.runsWithoutAudit > 0 && <p className="workspace-muted">{coverage.runsWithoutAudit} attempts have no search-check record and are excluded from completed sweeps.</p>}
+    <details className="workspace-card workspace-disclosure">
+      <summary>Recorded searches today ({queries.length})</summary>
+      <SearchQueries queries={queries} />
+    </details>
+  </section>;
+}
+
+export function RunSearchCoverage({ coverage }) {
+  if (!coverage || !Array.isArray(coverage.passes)) return <p className="workspace-muted">This run has no search-check record.</p>;
+  const passes = Array.isArray(coverage.passes) ? coverage.passes : [];
+  const completed = new Set(passes.filter((pass) => pass?.status === "completed").map((pass) => pass.name));
+  const completedCount = ["primary", "gap_check"].filter((name) => completed.has(name)).length;
+  const verification = coverage.verification || {};
+  const limitations = recordedText(coverage.limitations);
+  return <details className="workspace-card workspace-disclosure">
+    <summary>{completedCount} of 2 discovery passes completed · source verification: {verificationStatuses[verification.status] || "Not recorded"}</summary>
+    <p className="workspace-muted">Reporting window: {readableUTCDate(coverage.windowStart)} – {readableUTCDate(coverage.windowEnd)}.</p>
+    {passes.filter((pass) => pass && typeof pass === "object").map((pass, index) => <section key={`${pass.name}-${index}`}>
+      <h4>{passNames[pass.name] || "Discovery pass"}: {passStatuses[pass.status] || "Not recorded"}</h4>
+      <p>{recordedCount(pass.leadsFound)} leads returned · {recordedCount(pass.sourceCount)} source URLs recorded</p>
+      <SearchQueries queries={pass.queries} />
+    </section>)}
+    <p>Verification: {recordedCount(verification.leadsSelected)} leads selected · {recordedCount(verification.leadsDeferred)} deferred · {recordedCount(verification.recheckedReports)} existing drafts rechecked · {recordedCount(verification.updatedReports)} drafts updated.</p>
+    {limitations.length > 0 && <><h4>Remaining gaps and limits</h4><ul>{limitations.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}</ul></>}
+    <p className="admin-help">Both discovery passes and source verification share the run’s tool allowance. Completed searches do not establish complete coverage of the open web.</p>
+  </details>;
+}
+
 export function AIMonitorSettings({ client, onRunComplete }) {
   const [status, setStatus] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -54,7 +131,10 @@ export function AIMonitorSettings({ client, onRunComplete }) {
     try {
       const entries = Object.keys(rateLabels).filter((key) => draft.costRates[key] !== undefined && draft.costRates[key] !== "");
       if (entries.length > 0 && entries.length !== Object.keys(rateLabels).length) throw new Error("Enter every rate or leave them all blank.");
-      const costRates = Object.fromEntries(entries.map((key) => [key, Number(draft.costRates[key])]));
+      const costRates = entries.length ? {
+        ...draft.costRates,
+        ...Object.fromEntries(entries.map((key) => [key, Number(draft.costRates[key])])),
+      } : {};
       const result = await client.saveAISettings({ ...draft, costRates, dailyWarningUsd: Number(draft.dailyWarningUsd), enabled: status.serverEnabled && draft.enabled });
       accept(result);
       setMessage(result.effectiveEnabled ? "Monitor settings saved. Scheduled AI searches are enabled." : "Monitor settings saved. AI search remains paused.");
@@ -71,7 +151,9 @@ export function AIMonitorSettings({ client, onRunComplete }) {
       const result = await client.runAI();
       const failed = ["failed", "interrupted"].includes(result.status);
       if (failed) setError(result.error || `The search run ${result.status}. Review the run history below.`);
-      else setMessage(`Search run finished. ${result.candidatesCreated ?? 0} reports added for human review.`);
+      else setMessage(result.candidatesCreated > 0
+        ? `Search run finished. ${result.candidatesCreated} drafts added for human review.`
+        : "Search run finished. No new drafts were added in this run. Check the recorded searches and remaining gaps below.");
       try {
         accept(await client.aiStatus());
         await onRunComplete?.();
@@ -107,6 +189,7 @@ export function AIMonitorSettings({ client, onRunComplete }) {
           </div>
           {status.usageToday?.warning && <p className="inline-error" role="alert">Estimated discovery spend reached the daily warning threshold of {usd(status.dailyWarningUsd)}.</p>}
           {status.usageToday?.unpricedRuns > 0 && <p className="workspace-muted">{status.usageToday.unpricedRuns} runs without an estimate are excluded from totals.</p>}
+          <DailySearchCoverage coverage={status.coverageToday} />
           <form onSubmit={save}>
             <label className="monitor-toggle">
               <input type="checkbox" checked={draft.enabled} disabled={busy || !status.serverEnabled || (!status.keyConfigured && !draft.enabled)}
@@ -159,8 +242,9 @@ export function AIMonitorSettings({ client, onRunComplete }) {
           {!status.runs?.length ? <p>No AI searches have been run.</p> : <ul className="monitor-runs">
             {status.runs.map((entry) => <li key={entry.id}>
               <strong>{entry.status}</strong> · {readableDate(entry.startedAt)}
-              <p>{entry.candidatesCreated ?? 0} added · {entry.skippedLeads ?? 0} screened out before verification · {entry.webSearchCalls ?? 0} web calls · {entry.inputTokens ?? 0} input / {entry.outputTokens ?? 0} output tokens · {usd(entry.estimatedUsd)}</p>
+              <p>{entry.candidatesCreated ?? 0} drafts added · {entry.skippedLeads ?? 0} screened out before verification · {entry.webSearchCalls ?? 0} web tool items · {entry.billableSearchCalls == null ? "billable searches unavailable" : `${entry.billableSearchCalls} billable searches`} · {entry.inputTokens ?? 0} input / {entry.outputTokens ?? 0} output tokens · {usd(entry.estimatedUsd)}</p>
               {entry.error && <p className="inline-error">{entry.error}</p>}
+              <RunSearchCoverage coverage={entry.coverage} />
             </li>)}
           </ul>}
         </>

@@ -89,7 +89,7 @@ def _qualified_origins(urls, candidate=None, *, telegram=False):
         except ValueError:
             continue
         if url:
-            known[_reference_key(url)] = source
+            known.setdefault(_reference_key(url), []).append(source)
 
     material = _material_update(candidate)
     update_references = None
@@ -101,23 +101,31 @@ def _qualified_origins(urls, candidate=None, *, telegram=False):
         if not publisher:
             continue
         key = _reference_key(url)
-        source = known.get(key)
-        if source is None:
+        source_records = known.get(key)
+        if source_records is None:
             if telegram:
                 continue
             # A web reviewer may supply a new citation after checking the claims.
             group = "publisher:" + publisher
         else:
-            claims = source.get("supports")
-            if (source.get("contradicts") or not isinstance(claims, list) or
-                    not any(isinstance(claim, str) and claim.strip() for claim in claims) or
-                    source.get("openedByVerifier") is not True or
-                    (update_references is not None and key not in update_references)):
+            # Canonical URL aliases still describe one page. A later duplicate
+            # must not erase an earlier contradiction or change its origin.
+            if update_references is not None and key not in update_references:
                 continue
-            origin = source.get("independenceGroup")
-            if not isinstance(origin, str) or not origin.strip():
+            origins = set()
+            for source in source_records:
+                claims, origin = source.get("supports"), source.get("independenceGroup")
+                if (source.get("contradicts") or not isinstance(claims, list) or
+                        not any(isinstance(claim, str) and claim.strip() for claim in claims) or
+                        source.get("openedByVerifier") is not True or
+                        not isinstance(origin, str) or not origin.strip()):
+                    break
+                origins.add(" ".join(origin.casefold().split()))
+            else:
+                if len(origins) == 1:
+                    yield url, publisher, "origin:" + next(iter(origins))
                 continue
-            group = "origin:" + " ".join(origin.casefold().split())
+            continue
         yield url, publisher, group
 
 
@@ -197,7 +205,11 @@ def edit_manual_incident(session, incident, payload):
     confirmed = values.pop("independentSourcesConfirmed", False)
     values = normalize_payload(values, existing=incident)
     source_fields = {"source_url", "reference_urls", "sources"}
-    if values.get("status", incident.status) == "published" and (incident.status != "published" or values.keys() & source_fields):
+    factual_changes = {key for key, value in values.items()
+                       if key not in source_fields | {"status", "raw_fields"}
+                       and getattr(incident, key) != value}
+    if values.get("status", incident.status) == "published" and (
+            incident.status != "published" or factual_changes or values.keys() & source_fields):
         citations = {"source_url": incident.source_url, **values}
         if not values.keys() & {"reference_urls", "sources"}:
             citations["reference_urls"] = [source.url for source in incident.sources]
