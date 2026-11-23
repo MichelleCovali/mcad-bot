@@ -192,6 +192,74 @@ class CandidateFeedback(unittest.TestCase):
             "independentSourcesConfirmed": True}, headers=self.headers).status_code, 422)
         self.assertEqual(self.count(OutboxEvent), 0)
 
+    def test_published_factual_edit_uses_retained_sources_and_requires_confirmation(self):
+        with self.factory.begin() as session:
+            incident, _ = upsert_incident(session, {"title": "Historical one-source incident",
+                "summary": "Original description", "sourceUrl": "https://authority.example/original"}, notify=False)
+            identifier = incident.id
+        path = f"/api/incidents/{identifier}"
+        # Existing historical data is retained, but a new factual assertion must
+        # not bypass corroboration by omitting source fields from PATCH.
+        blocked = self.client.patch(path, json={"summary": "Claimed restoration",
+            "independentSourcesConfirmed": True}, headers=self.headers)
+        self.assertEqual(blocked.status_code, 422)
+        self.assertEqual(self.client.get(path).json()["summary"], "Original description")
+        self.assertEqual(self.client.patch(path, json={"summary": "Original description"},
+            headers=self.headers).status_code, 200)
+
+        checked = {"summary": "Confirmed restoration", "referenceUrls": [
+                       "https://authority.example/original", "https://press.example/recovery"],
+                   "independentSourcesConfirmed": True}
+        self.assertEqual(self.client.patch(path, json=checked, headers=self.headers).status_code, 200)
+        unchecked = self.client.patch(path, json={"impact": "Operations restored"}, headers=self.headers)
+        self.assertEqual(unchecked.status_code, 422)
+        # A checked follow-up can reuse both stored citations.
+        accepted = self.client.patch(path, json={"impact": "Operations restored",
+            "independentSourcesConfirmed": True}, headers=self.headers)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["impact"], "Operations restored")
+        self.assertEqual(self.count(OutboxEvent), 0)
+
+    def test_duplicate_evidence_cannot_overwrite_a_source_conflict_or_origin(self):
+        a, b = "https://authority.example/report", "https://press.example/report"
+        checked_a = {"url": a, "openedByVerifier": True, "supports": ["Confirmed incident"],
+                     "independenceGroup": "authority"}
+        checked_b = {"url": b, "openedByVerifier": True, "supports": ["Confirmed incident"],
+                     "independenceGroup": "press"}
+        variants = [{"contradicts": ["No operational disruption occurred"]},
+                    {"openedByVerifier": False}, {"supports": []},
+                    {"independenceGroup": "authority"}]
+        for fields in variants:
+            with self.subTest(fields=fields):
+                with self.factory.begin() as session:
+                    candidate = session.get(Candidate, self.candidate_id)
+                    candidate.origin = "ai"
+                    candidate.source_url = a
+                    candidate.evidence = {"sources": [checked_a, {**checked_b, **fields},
+                        {**checked_b, "url": "http://www.press.example/report?utm_source=copy"}]}
+                response = self.approve({"title": "Reviewed incident", "referenceUrls": [b],
+                    "independentSourcesConfirmed": True})
+                self.assertEqual(response.status_code, 422)
+                self.assertIn("two independent sources", response.json()["detail"])
+        self.assertEqual(self.count(Incident), 0)
+
+    def test_adding_corroboration_keeps_the_omitted_main_reference_and_its_evidence(self):
+        main = "https://authority.example/original"
+        with self.factory.begin() as session:
+            incident, _ = upsert_incident(session, {"title": "Historical reference fixture", "sourceUrl": main,
+                "sources": [{"url": main, "shortName": "Original source", "rawText": "Original evidence excerpt."}]},
+                notify=False)
+            identifier = incident.id
+        response = self.client.patch(f"/api/incidents/{identifier}", json={
+            "referenceUrls": ["https://press.example/corroboration"], "independentSourcesConfirmed": True},
+            headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        sources = {source["url"]: source for source in response.json()["sources"]}
+        self.assertEqual(set(sources), {main, "https://press.example/corroboration"})
+        self.assertEqual(sources[main]["shortName"], "Original source")
+        self.assertEqual(sources[main]["rawText"], "Original evidence excerpt.")
+        self.assertEqual(self.count(OutboxEvent), 0)
+
     def test_catalogs_follow_latest_workbook_without_inventing_values(self):
         empty = self.client.get("/api/admin/catalogs", headers=self.headers).json()
         self.assertEqual(len(empty["fields"]), 33)

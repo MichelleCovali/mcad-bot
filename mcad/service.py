@@ -135,8 +135,8 @@ def _replace_relations(incident, values):
     if "reference_urls" in values or "sources" in values or "source_url" in values:
         sources = values.pop("sources", None)
         urls = values.pop("reference_urls", None)
+        existing_sources = {source.url: source for source in incident.sources}
         if sources is not None or urls is not None:
-            existing_sources = {source.url: source for source in incident.sources}
             updated_sources = []
             seen = set()
             for raw in (sources or []) + [{"url": url} for url in (urls or [])]:
@@ -152,7 +152,11 @@ def _replace_relations(incident, values):
                     updated_sources.append(source)
             incident.sources[:] = updated_sources
         if incident.source_url and all(source.url != incident.source_url for source in incident.sources):
-            incident.sources.append(IncidentSource(url=incident.source_url, short_name=incident.reference_short or ""))
+            # A replacement list can omit the main reference while source_url
+            # still retains it. Reuse that row rather than delete/reinsert the
+            # same unique (incident, URL) key, keeping its original evidence.
+            incident.sources.append(existing_sources.get(incident.source_url) or
+                IncidentSource(url=incident.source_url, short_name=incident.reference_short or ""))
     for field, model in [("organisations", Organisation), ("actors", Actor), ("locations", Location)]:
         if field not in values:
             continue
