@@ -4,6 +4,7 @@ Importing this module, inspecting settings, and saving a schedule perform no HTT
 The only paid boundary is run_monitor_once, behind independent server/DB switches.
 """
 from datetime import datetime, timedelta, timezone
+from calendar import month_abbr, month_name
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 import ipaddress
@@ -27,6 +28,10 @@ LEASE_SECONDS = 900
 LEASE_NAME = "ai_monitor_run"
 SETTING_FIELDS = {"enabled", "runsPerDay", "lookbackHours", "maxCandidates", "maxToolCalls", "costRates", "dailyWarningUsd", "scopeFocus"}
 RATE_FIELDS = {"discoveryInput", "discoveryOutput", "verificationInput", "verificationOutput", "webCalls"}
+OPTIONAL_RATE_FIELDS = {
+    stage + suffix for stage in ("discovery", "verification")
+    for suffix in ("CachedInput", "CacheWrite30m", "CacheWrite12h")
+}
 
 
 class AIUnavailable(ValueError):
@@ -128,7 +133,10 @@ def run_dict(run):
         "startedAt": iso(run.started_at), "finishedAt": iso(run.finished_at),
         "candidatesCreated": run.candidates_created, "inputTokens": run.input_tokens,
         "outputTokens": run.output_tokens, "webSearchCalls": run.web_search_calls, "error": run.error,
+        "billableSearchCalls": sum(entry["billableSearchCalls"] for entry in stages)
+            if stages and all(entry.get("billableSearchCalls") is not None for entry in stages) else None,
         "estimatedUsd": sum(entry["estimatedMicros"] for entry in stages) / 1_000_000 if priced else None,
+        "estimateBasis": list(dict.fromkeys(entry.get("estimateBasis", "legacy_estimate") for entry in stages)),
         "skippedLeads": run.skipped_leads, "promptVersionId": run.prompt_version_id}
 
 
@@ -173,7 +181,9 @@ def update_monitor_settings(factory, settings, payload):
             if not isinstance(value, str) or len(value) > 350 or any(ord(char) < 32 for char in value):
                 raise ValueError("Search priorities must be one line of at most 350 characters.")
         elif name == "costRates":
-            if not isinstance(value, dict) or (value and (set(value) != RATE_FIELDS or not all(_is_rate(rate) for rate in value.values()))):
+            if not isinstance(value, dict) or (value and (
+                    not RATE_FIELDS.issubset(value) or set(value) - RATE_FIELDS - OPTIONAL_RATE_FIELDS
+                    or not all(_is_rate(rate) for rate in value.values()))):
                 raise ValueError("Provide all five pricing rates or clear the estimate.")
         elif name == "dailyWarningUsd":
             if not _is_rate(value):
@@ -269,7 +279,12 @@ def _response_result(response, schema):
     texts, urls, opened_urls, calls = [], set(), set(), 0
     for item in response.get("output", []):
         if item.get("type") == "web_search_call":
-            if item.get("status", "completed") != "completed":
+            tool_status = item.get("status", "completed")
+            if tool_status in {"searching", "in_progress"}:
+                # Completed Responses can retain a final unexecuted tool item
+                # at the tool limit. It supplies no usable sources or evidence.
+                continue
+            if tool_status != "completed":
                 raise AIResponseError("The web research tool did not complete successfully.")
             calls += 1
             action = item.get("action") or {}
@@ -359,7 +374,11 @@ def _request(model, prompt, schema, name, calls, output_tokens):
 
                     "Do not invent facts, dates, coordinates, quotations, "
                     "attribution, impacts, or source independence. "
+                    "List a contradiction only when it conflicts with a fact in your proposed description "
+                    "or another included source. A source ruling out an unrelated rumour is not a "
+                    "contradiction of a description that also rules it out. "
                     "Use null for unknown fields where the schema permits it. "
+                    "Represent month as a decimal string from 1 to 12. "
                     "Record uncertainty in the available explanation fields. "
                     "Return exactly the requested JSON schema in English."
                 ),
@@ -376,24 +395,95 @@ def _request(model, prompt, schema, name, calls, output_tokens):
         },
     }
 
+def _estimate_stage_cost(usage, rates, stage, billable_search_calls):
+    """Estimate from returned counts and a snapshot of the applicable rates."""
+    if not rates:
+        return None, "rates_not_configured"
+    if any(type(usage.get(key)) is not int or usage[key] < 0 for key in ("input_tokens", "output_tokens")):
+        return None, "token_usage_unavailable"
+    if billable_search_calls is None:
+        return None, "search_actions_unavailable"
+
+    details = usage.get("input_tokens_details") or {}
+    if not isinstance(details, dict):
+        return None, "token_details_unavailable"
+    cached, writes = details.get("cached_tokens", 0), details.get("cache_write_tokens", 0)
+    if any(type(count) is not int or count < 0 for count in (cached, writes)) or cached + writes > usage["input_tokens"]:
+        return None, "token_details_invalid"
+
+    input_rate = Decimal(str(rates[stage + "Input"]))
+    cached_rate = rates.get(stage + "CachedInput")
+    basis = "configured_rates"
+    if cached and cached_rate is None:
+        basis = "full_input_rate_for_cached_tokens"
+    cached_rate = Decimal(str(cached_rate)) if cached_rate is not None else input_rate
+    cost = (usage["input_tokens"] - cached - writes) * input_rate + cached * cached_rate
+
+    if writes:
+        breakdown = details.get("cache_write_tokens_details")
+        if not isinstance(breakdown, dict):
+            return None, "cache_write_lifetime_unavailable"
+        short, long = breakdown.get("ttl_30m_tokens", 0), breakdown.get("ttl_12h_tokens", 0)
+        if any(type(count) is not int or count < 0 for count in (short, long)) or short + long != writes:
+            return None, "cache_write_details_invalid"
+        for count, suffix in ((short, "CacheWrite30m"), (long, "CacheWrite12h")):
+            if count:
+                rate = rates.get(stage + suffix)
+                if rate is None:
+                    return None, "cache_write_rate_unavailable"
+                cost += count * Decimal(str(rate))
+
+    # USD / million tokens equals microdollars per token. Reasoning tokens are
+    # already part of output_tokens and must not be added a second time.
+    cost += usage["output_tokens"] * Decimal(str(rates[stage + "Output"]))
+    cost += billable_search_calls * 1000 * Decimal(str(rates["webCalls"]))
+    return int(cost.quantize(Decimal(1), rounding=ROUND_HALF_UP)), basis
+
+
 def _usage(factory, run_id, response, calls=0, *, stage, model, rates):
-    usage = response.get("usage") or {}
-    def count(name):
-        value = usage.get(name, 0)
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    web_items = [item for item in response.get("output", [])
+        if isinstance(item, dict) and item.get("type") == "web_search_call"]
+    action_counts, status_counts = {}, {}
+    incomplete_count = 0
+    actions_known = len(web_items) == calls
+    for item in web_items:
+        action = item.get("action")
+        action_type = action.get("type") if isinstance(action, dict) else None
+        if action_type not in {"search", "open_page", "find_in_page"}:
+            actions_known = False
+            action_type = "unknown"
+        status = item.get("status")
+        status = status if isinstance(status, str) and len(status) <= 80 else "unknown"
+        action_counts[action_type] = action_counts.get(action_type, 0) + 1
+        status_counts[status] = status_counts.get(status, 0) + 1
+        incomplete_count += status != "completed"
+
+    tool_usage = response.get("tool_usage")
+    web_usage = tool_usage.get("web_search") if isinstance(tool_usage, dict) else None
+    provider_search_calls = web_usage.get("num_requests") if isinstance(web_usage, dict) else None
+    if type(provider_search_calls) is int and provider_search_calls >= 0:
+        billable_search_calls, search_basis = provider_search_calls, "provider_tool_usage"
+    elif actions_known and not incomplete_count:
+        billable_search_calls, search_basis = action_counts.get("search", 0), "completed_search_actions"
+    else:
+        billable_search_calls, search_basis = None, "unavailable"
+    estimate, basis = _estimate_stage_cost(usage, rates, stage, billable_search_calls)
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    input_tokens = input_tokens if type(input_tokens) is int and input_tokens >= 0 else 0
+    output_tokens = output_tokens if type(output_tokens) is int and output_tokens >= 0 else 0
     with factory.begin() as session:
         run = session.get(AIRun, run_id)
-        input_tokens, output_tokens = count("input_tokens"), count("output_tokens")
-        runs_with_usage = all(type(usage.get(key)) is int and usage[key] >= 0 for key in ("input_tokens", "output_tokens"))
-        estimate = None
-        if rates and runs_with_usage:
-            # USD / million tokens equals microdollars per token. Cached input is
-            # conservatively estimated at the full input rate; billing is external.
-            estimate = int((Decimal(str(rates[stage + "Input"])) * input_tokens
-                + Decimal(str(rates[stage + "Output"])) * output_tokens
-                + Decimal(str(rates["webCalls"])) * 1000 * calls).quantize(Decimal(1), rounding=ROUND_HALF_UP))
         run.stages = [*run.stages, {"stage": stage, "model": model, "inputTokens": input_tokens,
-            "outputTokens": output_tokens, "webSearchCalls": calls, "estimatedMicros": estimate}]
+            "responseModel": response.get("model"), "serviceTier": response.get("service_tier"),
+            "outputTokens": output_tokens, "webSearchCalls": calls,
+            "webActionCounts": action_counts, "webActionStatusCounts": status_counts,
+            "incompleteResearchCount": incomplete_count, "billableSearchBasis": search_basis,
+            "billableSearchCalls": billable_search_calls, "estimatedMicros": estimate,
+            "estimateBasis": basis, "usage": usage,
+            "toolUsage": response.get("tool_usage"), "costRates": dict(rates or {})}]
         run.input_tokens += input_tokens
         run.output_tokens += output_tokens
         run.web_search_calls += calls
@@ -455,7 +545,11 @@ def _context(factory):
         feedback = [{"title": title, "reason": reason, "notes": (notes or "")[:600]} for title, reason, notes in session.execute(
             select(Candidate.title, Candidate.rejection_reason, Candidate.rejection_notes).where(Candidate.status == "rejected")
             .order_by(Candidate.first_seen_at.desc()).limit(20))]
-    return {"knownIncidents": known, "reviewerFeedback": feedback}
+        pending = [{"title": report.title, "summary": (report.summary or "")[:500],
+            "sourceUrl": report.source_url} for report in session.scalars(
+                select(Candidate).where(Candidate.status == "pending")
+                .order_by(Candidate.first_seen_at.desc()).limit(50))]
+    return {"knownIncidents": known, "pendingReports": pending, "reviewerFeedback": feedback}
 
 
 def _identity(title):
@@ -616,6 +710,24 @@ def _screen_leads(factory, leads, seen_urls, limits, now):
 
 
 def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
+    proposals, failures = [], []
+    for row in result["candidates"]:
+        try:
+            proposals.extend(_checked_proposals({"candidates": [row]}, research_urls,
+                opened_urls, run_id, now, lookback_hours))
+        except ValueError as error:
+            failures.append(error)
+    if failures and not proposals:
+        raise AIResponseError("No researched report passed source and field validation.") from failures[0]
+    if failures:
+        for proposal in proposals:
+            proposal["evidence"]["batchWarnings"] = [
+                f"{len(failures)} other report(s) from this response failed validation and were excluded."
+            ]
+    return proposals
+
+
+def _checked_proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
     proposals = []
     for row in result["candidates"]:
         fields = row["fields"]
@@ -669,6 +781,11 @@ def _proposals(result, research_urls, opened_urls, run_id, now, lookback_hours):
             assessment = "contradicted"
         # A search model cannot assign the project's curator identity or stable reference number.
         fields = {**fields, "qa": "", "reference_number": ""}
+        month = fields.get("month")
+        if isinstance(month, str):
+            names = {name.casefold(): str(number) for number in range(1, 13)
+                for name in (month_name[number], month_abbr[number])}
+            fields["month"] = names.get(month.strip().casefold(), month.strip())
         payload = normalize_payload(fields)
         from .import_workbook import parse_date_fields
         dates = parse_date_fields(payload.get("year"), payload.get("month"), payload.get("year_end"))
@@ -842,6 +959,7 @@ def _persist(factory, run_id, proposals, *, skipped_leads=0, negative_cache=(), 
             created += 1
         run = session.get(AIRun, run_id)
         run.candidates_created, run.status, run.finished_at = created, "completed", utcnow()
+        run.error = None
         run.skipped_leads = skipped_leads
         session.flush()
         return run_dict(run)
@@ -876,7 +994,10 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
             "affected operators and authorities and independent reporting in local languages. Prioritise reports after "
             "the overlapping checkpoint within the full window. Preserve the original event date and first reporting "
             "date. For a development, put the date and newly established facts in development. Use null for a new "
-            "incident. A recent repost without new facts does not qualify. Return at most maxCandidates."
+            "incident. At discovery, return plausible named incident leads even with one original source. Independent "
+            "corroboration is the next stage's job. Include newly confirmed recovery, disruption, breach findings or "
+            "investigation details about an older attack when the new facts fall inside the reporting window. "
+            "A recent repost without new facts does not qualify. Return at most maxCandidates."
             ),
             "nowUTC": iso(now), "reportedSinceUTC": iso(window_start), "prioritySinceUTC": iso(checkpoint),
             "reviewedInstructions": limits["prompt"]["discoveryInstructions"],
@@ -889,8 +1010,8 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
             _usage(factory, run_id, response, calls, stage="discovery", model=settings.ai_discovery_model, rates=limits["cost_rates"])
-        discovered, discovery_urls, _, _ = _response_result(response, DISCOVERY_SCHEMA)
-        if calls > discovery_calls or len(discovered["candidates"]) > limits["max_candidates"]:
+        discovered, discovery_urls, completed_calls, _ = _response_result(response, DISCOVERY_SCHEMA)
+        if completed_calls > discovery_calls or len(discovered["candidates"]) > limits["max_candidates"]:
             raise AIResponseError("The discovery stage exceeded its configured limits.")
         if not discovered["candidates"]:
             _ensure_enabled(factory, settings)
@@ -927,8 +1048,8 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
             _usage(factory, run_id, response, calls, stage="verification", model=settings.ai_verification_model, rates=limits["cost_rates"])
-        verified, verification_urls, _, opened_urls = _response_result(response, VERIFICATION_SCHEMA)
-        if calls > limits["max_tool_calls"] - discovery_calls or len(verified["candidates"]) > limits["max_candidates"]:
+        verified, verification_urls, completed_calls, opened_urls = _response_result(response, VERIFICATION_SCHEMA)
+        if completed_calls > limits["max_tool_calls"] - discovery_calls or len(verified["candidates"]) > limits["max_candidates"]:
             raise AIResponseError("The verification stage exceeded its configured limits.")
         _ensure_enabled(factory, settings)
         proposals = _proposals(verified, verification_urls, opened_urls, run_id, now, limits["lookback_hours"])

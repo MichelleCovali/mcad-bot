@@ -54,7 +54,10 @@ export function AIMonitorSettings({ client, onRunComplete }) {
     try {
       const entries = Object.keys(rateLabels).filter((key) => draft.costRates[key] !== undefined && draft.costRates[key] !== "");
       if (entries.length > 0 && entries.length !== Object.keys(rateLabels).length) throw new Error("Enter every rate or leave them all blank.");
-      const costRates = Object.fromEntries(entries.map((key) => [key, Number(draft.costRates[key])]));
+      const costRates = entries.length ? {
+        ...draft.costRates,
+        ...Object.fromEntries(entries.map((key) => [key, Number(draft.costRates[key])])),
+      } : {};
       const result = await client.saveAISettings({ ...draft, costRates, dailyWarningUsd: Number(draft.dailyWarningUsd), enabled: status.serverEnabled && draft.enabled });
       accept(result);
       setMessage(result.effectiveEnabled ? "Monitor settings saved. Scheduled AI searches are enabled." : "Monitor settings saved. AI search remains paused.");

@@ -55,6 +55,8 @@ def response(data, urls=(URL_A, URL_B), *, opened=False):
     tools = [{"type": "web_search_call", "action": {"type": "search", "sources": [{"url": url} for url in urls]}}]
     if opened:
         tools.extend({"type": "web_search_call", "action": {"type": "open_page", "url": url}} for url in urls)
+    for tool in tools:
+        tool["status"] = "completed"
     return {"id": "resp_synthetic", "status": "completed",
         "usage": {"input_tokens": 100, "output_tokens": 40},
         "output": [*tools, {"type": "message", "content": [{"type": "output_text", "text": json.dumps(data), "annotations": []}]}]}
@@ -131,12 +133,12 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual((second["status"], second["skippedLeads"], len(client.requests)), ("completed", 2, 1))
 
     def test_empty_verification_is_cached_temporarily_and_pricing_uses_stage_usage(self):
-        self.enable(dailyWarningUsd=0.04, scopeFocus="North Sea ports", costRates={
+        self.enable(dailyWarningUsd=0.02, scopeFocus="North Sea ports", costRates={
             "discoveryInput": 1, "discoveryOutput": 2, "verificationInput": 3,
             "verificationOutput": 4, "webCalls": 10})
         first_client = FakeClient(response(discovery()), response({"candidates": []}, opened=True))
         first = run_monitor_once(self.factory, self.settings, client=first_client)
-        self.assertEqual(first["estimatedUsd"], 0.04064)
+        self.assertEqual(first["estimatedUsd"], 0.02064)
         self.assertIn("North Sea ports", first_client.requests[0]["input"][1]["content"])
         self.assertTrue(get_monitor_status(self.factory, self.settings)["usageToday"]["warning"])
         second_client = FakeClient(response(discovery()))
@@ -185,12 +187,34 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.count(OutboxEvent), 0)
         self.assertEqual(self.count(Incident), 0)
 
+    def test_completed_response_ignores_a_dangling_unexecuted_tool_item(self):
+        self.enable()
+        data = response({"candidates": []})
+        data["output"].insert(1, {"type": "web_search_call", "status": "searching",
+            "action": {"type": "search", "sources": [{"url": "https://unused.example.net/report"}]}})
+        data["tool_usage"] = {"web_search": {"num_requests": 1}}
+        run = run_monitor_once(self.factory, self.settings, client=FakeClient(data))
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual((run["webSearchCalls"], run["billableSearchCalls"]), (2, 1))
+        self.assertEqual(self.count(Candidate), 0)
+
     def test_search_snippets_or_syndicated_sources_stay_in_review(self):
         self.enable()
         client = self.happy_client(opened=False)
         self.assertEqual(run_monitor_once(self.factory, self.settings, client=client)["status"], "completed")
         with self.factory() as session:
             self.assertEqual(session.scalar(select(Candidate)).verification_status, "needs_review")
+
+    def test_named_month_from_provider_keeps_the_same_numeric_month(self):
+        from calendar import month_name
+        self.enable()
+        verified = verification()
+        verified["candidates"][0]["fields"]["month"] = month_name[utcnow().month]
+        result = run_monitor_once(self.factory, self.settings, client=self.happy_client(verified))
+        self.assertEqual(result["status"], "completed")
+        with self.factory() as session:
+            candidate = session.scalar(select(Candidate))
+            self.assertEqual(candidate.proposed_fields["month"], str(utcnow().month))
 
     def test_shared_source_origin_and_contradictions_do_not_claim_support(self):
         self.enable()
@@ -223,6 +247,20 @@ class MonitorTests(unittest.TestCase):
             run = run_monitor_once(self.factory, self.settings, client=self.happy_client(verified))
             self.assertEqual(run["status"], "failed")
         self.assertEqual(self.count(Candidate), 0)
+
+    def test_one_untraceable_report_does_not_discard_other_verified_reports(self):
+        self.enable(maxCandidates=2)
+        verified = verification()
+        broken = deepcopy(verified["candidates"][0])
+        broken["fields"]["title"] = "Untraceable second report"
+        broken["sources"][0]["url"] = "https://unseen-source.example.com/fake"
+        verified["candidates"].insert(0, broken)
+        result = run_monitor_once(self.factory, self.settings, client=self.happy_client(verified))
+        self.assertEqual((result["status"], result["candidatesCreated"]), ("completed", 1))
+        with self.factory() as session:
+            candidate = session.scalar(select(Candidate))
+            self.assertEqual(candidate.title, "Fictional port incident")
+            self.assertIn("failed validation", candidate.evidence["batchWarnings"][0])
 
     def test_old_reprints_are_not_fresh_candidates(self):
         self.enable()

@@ -86,6 +86,18 @@ def buttons(bot):
             for button in row if "callback_data" in button}
 
 
+def test_unverified_lead_reaches_only_editors_and_has_no_accept_action(factory):
+    with factory.begin() as session:
+        draft = Candidate(title="Unconfirmed lead", summary="Only one source currently supports this lead.",
+            source_url=FIRST, origin="ai", verification_status="needs_review")
+        session.add(draft)
+        assert create_candidate_notification(session, draft) is None
+        create_candidate_notification(session, draft, review_chat_id=str(CHAT))
+    bot = send_review(factory)
+    assert set(buttons(bot)) == {"Reject"}
+    assert "Further verification required" in bot.reviews[0][1]
+
+
 def test_approval_is_bound_to_the_exact_review_chat_delivery_and_reviewer(factory):
     candidate_id = prepare(factory)
     bot = send_review(factory)

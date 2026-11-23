@@ -19,6 +19,8 @@ from .telegram_feedback import send_notification
 def _reviewable(candidate, private):
     if not candidate or candidate.origin != "ai" or candidate.status != "pending" or candidate.baseline:
         return False
+    if private:
+        return True
     evidence = candidate.evidence or {}
     related = (
         candidate.relationship_type in {"possible_update", "possible_duplicate"}
@@ -27,12 +29,12 @@ def _reviewable(candidate, private):
             and (evidence.get("materialUpdate") or evidence.get("suggestedIncidentId")))
     )
     if related:
-        return bool(private and candidate.verification_status in {"supported", "needs_review"})
+        return False
     return candidate.verification_status == "supported"
 
 
 def create_candidate_notification(session, candidate, review_chat_id=""):
-    """Queue a supported AI draft for the review chat or legacy subscribers.
+    """Queue an AI draft for editors, or a supported report for subscribers.
 
     The caller owns the transaction containing the new candidate. Repeating this
     function never creates another event, adds new recipients, or sends HTTP.
