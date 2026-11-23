@@ -86,10 +86,11 @@ def buttons(bot):
             for button in row if "callback_data" in button}
 
 
-def test_unverified_lead_reaches_only_editors_and_has_no_accept_action(factory):
+@pytest.mark.parametrize("verification_status", ["needs_review", "contradicted"])
+def test_unverified_lead_reaches_only_editors_and_has_no_accept_action(factory, verification_status):
     with factory.begin() as session:
         draft = Candidate(title="Unconfirmed lead", summary="Only one source currently supports this lead.",
-            source_url=FIRST, origin="ai", verification_status="needs_review")
+            source_url=FIRST, origin="ai", verification_status=verification_status)
         session.add(draft)
         assert create_candidate_notification(session, draft) is None
         create_candidate_notification(session, draft, review_chat_id=str(CHAT))

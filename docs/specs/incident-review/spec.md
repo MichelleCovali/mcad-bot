@@ -10,6 +10,11 @@ The administration screen puts settings, evidence, relationship decisions, and a
 
 Signed-in reviewers and administrators review RSS and AI reports from the queue or existing Telegram links. Public readers see approved incidents on the map and list. Keep account authentication and reviewer permissions, review links, resolved reports and feedback, incident IDs, workbook provenance, date and location precision, and existing Telegram behavior. Put AI settings, Telegram settings, and workbook import in a separate administration view. Eligibility and uncertainty follow the [domain rules](../../incident-selection-rules.md).
 
+The requested live discovery pilot also delivers uncertain AI drafts to the configured
+private editorial chat for inspection and explained rejection. This does not make them
+eligible for subscriber alerts or Telegram acceptance; source and relationship checks
+still govern publication. See [live monitoring verification](../../ai-monitor.md#local-live-pilot-23-november-2026).
+
 The first release supports changes to title, summary, affected systems, impact, method, countermeasures, and additional information. Dates, coordinates, and other classifications are deferred. Historical research, advanced matching, material-update alerts, and restoration from revisions are out of scope.
 
 ## Review decisions

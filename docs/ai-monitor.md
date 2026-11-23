@@ -2,7 +2,8 @@
 
 The monitor is implemented but **paused by default**. Adding `OPENAI_API_KEY`, deploying,
 opening the administrator panel, importing Excel, and saving a schedule do not start a search.
-No live OpenAI request was made while implementing or testing this change.
+Automated checks use synthetic clients. An explicitly requested local live pilot is
+documented separately below; adding credentials still does not activate monitoring.
 
 ## Configuration and activation
 
@@ -49,7 +50,9 @@ system incidents. The verifier receives the leads, searches independently, and o
 original evidence. It is instructed to distinguish original reporting from syndication,
 allegations from confirmation, and newly reported incidents from old stories republished
 today. Limited recent database titles and rejection feedback help avoid repeats and
-known classification mistakes. Retrieved pages and stored feedback are treated as
+known classification mistakes. Pending review reports also form bounded context to
+avoid rediscovering the same draft. Discovery can submit a named one-source lead;
+the separate verification stage seeks independent corroboration. Retrieved pages and stored feedback are treated as
 untrusted content, not instructions.
 
 Discovery prioritises the overlap around the last successful run and still considers the
@@ -66,12 +69,19 @@ story from the same origin, missing freshness, or search snippets alone remains
 `needs_review`. Conflicting claims are labelled `contradicted`. Known old reports are
 excluded. Source independence and quoted claims still require human judgement: an
 opened URL proves the research trail, not that every model claim is correct.
+Each report is validated separately: one invalid report does not discard valid reports
+in the same response. Excluded reports produce a batch warning on retained evidence.
+English month names are normalized without inventing day-level precision. A completed
+response may contain a dangling in-progress tool item; it contributes no accepted
+sources or completed tool calls. Failed or incomplete overall responses still fail.
 
-Every result is a pending candidate. A new `supported` candidate creates a durable
-editorial Telegram alert when the review chat is configured. The editor sees the
-proposed description and links, then accepts it or replies with `/reject` and an
-explanation. Reports marked `needs_review` or `contradicted` remain in the web queue.
-Publication in either surface requires at least two independent reporting origins.
+Every result is a pending candidate. A configured private editorial chat receives
+pending AI drafts, including `needs_review` and `contradicted` reports, clearly marked
+for further verification. These drafts have no Telegram acceptance action. The editor
+can inspect the evidence in MCAD or reply with `/reject` and an explanation. Subscriber
+research alerts remain restricted to supported new reports; possible updates and
+duplicates never alert subscribers. Publication in either surface requires at least
+two independent reporting origins.
 Explained rejections become confirmed regression cases for the prompt workflow.
 See [the operations guide](operations.md) for the review chat configuration.
 
@@ -107,7 +117,15 @@ Each run uses at most two Responses API requests. One third of the web-tool allo
 goes to discovery and the remainder to verification (default 5 + 10). Empty discovery
 results finish after the first request. Output limits are 4,500 and 9,000 tokens.
 Run history stores provider-reported input/output tokens, observed web-tool calls,
-candidate counts, timestamps and sanitized errors. Some interrupted requests can incur
+billable search counts, stage-level usage and rate snapshots, candidate counts,
+timestamps and sanitized errors. Billable search counts prefer provider
+`tool_usage.web_search.num_requests`; otherwise only known, completed search actions
+are counted. Open-page and find actions do not add a search fee. Token estimates
+separate uncached input, cached reads, cache writes and output. Optional cached-read,
+30-minute-write and 12-hour-write rates can be supplied per model stage. Without a
+cached-read rate, full input pricing is explicitly labelled as conservative. Missing
+write rates or incomplete usage produce an unavailable estimate rather than zero.
+Some interrupted requests can incur
 cost without a returned usage report. These controls limit work; they are not a hard
 dollar spending cap. Use the OpenAI project's Usage view for actual billing.
 
@@ -116,6 +134,29 @@ the independent switches, schedule and quota, overlapping calls, pausing at a pa
 boundary, malformed/refused/incomplete responses, evidence provenance, stale reports,
 duplicates, and the absence of publication or notifications. They do not establish live
 model access, live source quality, or a measured per-run price.
+
+## Local live pilot, 23 November 2026
+
+The user requested real incident discovery using separate test credentials and a
+private test Telegram bot. No production credentials or production database were
+used. Diagnostic Luna discovery returned no candidates. A wider seven-day discovery
+and verification sequence using Sol for both stages stored two pending reports and
+delivered them to the test reviewer. Both still required further source verification;
+neither was published. Model, prompt and time-window changes were combined, so this
+does not establish a controlled model comparison or retrieval recall.
+
+The completed paid discovery and verification stages together were estimated at
+$0.371381 from returned usage and configured standard rates. All diagnostic stages
+with returned usage totalled approximately $0.50. These are estimates, not reconciled
+billing or measured daily spending. One verification request returned HTTP 503; its
+missing usage cannot establish that it was free. Captured successful responses were
+reprocessed locally without additional provider calls. Replaying the same verification
+on a disposable archive copy left the candidate count at two, preventing two repeats.
+
+A finite local pilot was configured for three runs per day, with a cutoff on
+24 November. It requires the local process and computer to remain running. Feedback
+prompt analysis was not enabled. Raw responses, databases and credentials are excluded
+from Git and CI.
 
 API contracts were checked against the official OpenAI documentation:
 [web search](https://developers.openai.com/api/docs/guides/tools-web-search),
