@@ -8,7 +8,13 @@
 - [x] Display UTC daily checks, pass detail and unresolved verification without completeness claims.
 - [x] Run 198 backend tests, 46 frontend tests, four Sites checks and the production frontend build; inspect the local browser.
 - [x] Record the bounded live result and its incomplete verification explicitly below.
-- [ ] Verify PostgreSQL and container CI, update the feature PR and merge after checks pass.
+- [x] Verify PostgreSQL and container CI and update the feature PR. Merge follows successful branch checks.
+
+CI on `bd10e81` passed all four jobs: 198 backend tests, eight PostgreSQL checks,
+46 frontend tests, four Sites checks and production container readiness/authentication.
+The local browser displayed actual query traces, replay markers, six deferred checks,
+three unconfirmed drafts and no source-supported/publication claim. Private bot delivery
+state recorded three sent review notifications. [CI run](https://github.com/MichelleCovali/mcad-bot/actions/runs/45216593507).
 
 ## Live verification
 
