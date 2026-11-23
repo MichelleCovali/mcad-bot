@@ -54,5 +54,10 @@ The recent-reporting time limit does not apply to historical research.
 ## Publication
 
 All collected leads require human review before publication.
+Confirmed new incidents and factual changes require at least two independent reporting
+origins. Repeated copies of one statement count once. A one-source lead stays unconfirmed
+and can be revisited for corroboration. Adding a citation alone does not confirm new facts.
 Unknown facts remain blank.
-These rules are a draft pending client confirmation.
+The maritime cyber scope was confirmed against the existing archive on 23 November 2026,
+along with the minimum independent-source rule. Detailed classification rules remain a
+draft for client review.

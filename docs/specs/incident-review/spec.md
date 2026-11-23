@@ -28,6 +28,10 @@ The first release supports changes to title, summary, affected systems, impact, 
 ## Update behavior
 
 - Require a reason and explicitly selected supporting sources. Factual updates require two independent reporting origins and reviewer confirmation. Existing sources may contribute to corroboration. One genuinely new supporting source is sufficient for an evidence-only update. Reject submissions that contain neither a changed value nor a genuinely new source. Preserve unknowns and distinguish attributed, disputed, and corroborated claims.
+- Direct edits to published facts also require two independent citations and explicit
+  source confirmation, including when the request retains the current sources. A
+  no-op or hiding a record does not assert new facts. Canonical URL aliases cannot
+  overwrite contradictory, unopened or differently attributed evidence.
 - Change only the confirmed incident and selected fields or sources. Keep prior sources, provenance, and unselected data. Save the update, report outcome, and linked revision together. A repeated submission cannot create a second revision or alert. Updates create no new incident or publication alert. Before review, related reports may alert the configured private reviewer chat. They are excluded from public and subscriber alerts. New reports retain their existing alert behavior.
 - Provide an administrator-only history view for the incident. Show when each revision was recorded, why it was made, and what changed, including previous and new values and added sources where applicable.
 

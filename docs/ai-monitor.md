@@ -25,7 +25,9 @@ Pausing in the panel prevents new runs and is checked again immediately before e
 stage and before candidate storage. It cannot cancel a provider request already in flight.
 
 Settings allow **3, 4, or 6 runs per day** (intervals of 8, 6, or 4 hours), a reporting lookback
-of 1–168 hours, 1–10 candidate proposals, and 2–30 web tool calls per run. Defaults are
+of 1–168 hours, 1–10 candidate proposals, and 2–30 web tool calls per run. The search
+window always includes the current UTC day, even when the configured lookback is shorter.
+Defaults are
 3 runs/day, a 48-hour lookback, 5 candidates, and 15 tool calls. The schedule begins when
 enabled and due; it is interval based rather than tied to local wall-clock hours.
 Daily quotas use UTC and include manual, failed, and interrupted attempts because those
@@ -55,11 +57,25 @@ avoid rediscovering the same draft. Discovery can submit a named one-source lead
 the separate verification stage seeks independent corroboration. Retrieved pages and stored feedback are treated as
 untrusted content, not instructions.
 
-Discovery prioritises the overlap around the last successful run and still considers the
-configured reporting window, so late-indexed sources can qualify. Only leads grounded in
+Discovery runs a primary search and a complementary search for omissions. The second
+pass considers the full window even when the first returns nothing, changes query angles
+and local-language terms, and covers maritime categories and regions without chosen
+publishers. Search priorities supplement this scope. Discovery prioritises the overlap
+around the last successful run and still considers the full reporting window, so
+late-indexed sources can qualify. Only leads grounded in
 the discovery tool's sources reach verification. Exact repeats are screened before spending
 on the second model; a fully empty verification result can be reused for six hours for the
 same lead and configuration. A changed lead or new evidence can be verified again.
+Candidate limits are shared across passes before verification. Deferred grounded leads
+are carried in a bounded run backlog. Verification batches also reserve capacity for
+a search and two opened sources per report; with the default allowance this selects
+up to three reports per batch. Selected leads omitted from a valid response stay in
+the backlog. Larger batches receive a proportionate output allowance, capped at 18,000
+tokens. Recent unresolved drafts are rechecked after a
+six-hour cooldown, with the least recently checked selected first. Successful checks
+refresh the same untouched draft, retain earlier evidence and do not send another alert.
+An intervening human decision is preserved. Ambiguous followup results are quarantined
+in run evidence rather than creating another draft.
 
 Structured results are checked locally before storage. Each evidence URL must appear
 in the verifier's actual tool results or citation trail; excerpts and supported or
@@ -113,9 +129,11 @@ container; see [CI](ci.md).
 
 ## Usage and verification
 
-Each run uses at most two Responses API requests. One third of the web-tool allowance
-goes to discovery and the remainder to verification (default 5 + 10). Empty discovery
-results finish after the first request. Output limits are 4,500 and 9,000 tokens.
+Each run uses at most three Responses API requests. One third of the web-tool allowance
+is split between primary and complementary discovery, and the remainder goes to
+verification (default 3 + 2 + 10). With fewer than six allowed tool calls the second pass
+is budget-skipped and the run is visibly partial. Empty first-pass results still trigger
+the second pass. Output limits are 4,500 tokens per discovery and 9,000–18,000 for verification.
 Run history stores provider-reported input/output tokens, observed web-tool calls,
 billable search counts, stage-level usage and rate snapshots, candidate counts,
 timestamps and sanitized errors. Billable search counts prefer provider
@@ -125,9 +143,20 @@ separate uncached input, cached reads, cache writes and output. Optional cached-
 30-minute-write and 12-hour-write rates can be supplied per model stage. Without a
 cached-read rate, full input pricing is explicitly labelled as conservative. Missing
 write rates or incomplete usage produce an unavailable estimate rather than zero.
+If a request fails without returning usage, the full-run estimate stays unavailable;
+`knownEstimatedUsd` retains priced stages without implying the missing request was free.
 Some interrupted requests can incur
 cost without a returned usage report. These controls limit work; they are not a hard
 dollar spending cap. Use the OpenAI project's Usage view for actual billing.
+
+The administrator sees UTC daily search checks and each run's actual window, requested
+scope, returned queries, pass status, deferred verification and remaining limitations.
+Requested categories do not prove those categories were searched exhaustively. Missing
+queries, repeated primary queries, reached limits and failed passes remain visible.
+Legacy runs without coverage records are not counted as completed sweeps. Migration 11
+adds separate JSON coverage storage without changing usage history or enabling AI.
+No search status claims that every maritime incident on the open web has been captured.
+See the [agreed discovery scope and verification plan](specs/discovery-coverage/spec.md).
 
 Automated tests inject synthetic Responses payloads and block external HTTP. They cover
 the independent switches, schedule and quota, overlapping calls, pausing at a paid
