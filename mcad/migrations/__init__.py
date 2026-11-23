@@ -13,6 +13,7 @@ from .v0007_discovery_operations import upgrade as discovery_operations
 from .v0008_editorial_learning import upgrade as editorial_learning
 from .v0009_integrated_candidate_relationships import upgrade as integrated_relationships
 from .v0006_incident_revisions import upgrade as incident_revisions
+from .v0011_research_coverage import upgrade as research_coverage
 
 MIGRATIONS = [
     (1, initial_schema),
@@ -25,6 +26,7 @@ MIGRATIONS = [
     (8, editorial_learning),
     (9, integrated_relationships),
     (10, incident_revisions),
+    (11, research_coverage),
 ]
 
 def migrate(engine):

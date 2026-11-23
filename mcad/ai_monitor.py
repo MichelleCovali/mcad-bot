@@ -22,6 +22,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import AIConfig, AIRun, Candidate, DiscoveryCache, Incident, IncidentSource, WorkerLease, utcnow
 from .service import camel_case, iso, normalize_payload, safe_url
+from .research_coverage import coverage_today, new_coverage, tool_budgets, trace_queries
 
 
 LEASE_SECONDS = 900
@@ -128,28 +129,35 @@ def _config(session):
 
 def run_dict(run):
     stages = run.stages or []
-    priced = bool(stages) and all(entry.get("estimatedMicros") is not None for entry in stages)
+    coverage = run.coverage or {}
+    missing_usage = any(item.get("usageMissing") for item in coverage.get("passes", [])) or coverage.get("verification", {}).get("usageMissing", False)
+    priced = bool(stages) and not missing_usage and all(entry.get("estimatedMicros") is not None for entry in stages)
     return {"id": run.id, "status": run.status, "trigger": run.trigger,
         "startedAt": iso(run.started_at), "finishedAt": iso(run.finished_at),
         "candidatesCreated": run.candidates_created, "inputTokens": run.input_tokens,
         "outputTokens": run.output_tokens, "webSearchCalls": run.web_search_calls, "error": run.error,
         "billableSearchCalls": sum(entry["billableSearchCalls"] for entry in stages)
-            if stages and all(entry.get("billableSearchCalls") is not None for entry in stages) else None,
+            if stages and not missing_usage and all(entry.get("billableSearchCalls") is not None for entry in stages) else None,
         "estimatedUsd": sum(entry["estimatedMicros"] for entry in stages) / 1_000_000 if priced else None,
-        "estimateBasis": list(dict.fromkeys(entry.get("estimateBasis", "legacy_estimate") for entry in stages)),
-        "skippedLeads": run.skipped_leads, "promptVersionId": run.prompt_version_id}
+        "knownEstimatedUsd": sum(entry.get("estimatedMicros") or 0 for entry in stages) / 1_000_000
+            if any(entry.get("estimatedMicros") is not None for entry in stages) else None,
+        "estimateBasis": list(dict.fromkeys([*(entry.get("estimateBasis", "legacy_estimate") for entry in stages),
+            *(["request_usage_unavailable"] if missing_usage else [])])),
+        "skippedLeads": run.skipped_leads, "promptVersionId": run.prompt_version_id,
+        "coverage": run.coverage or {}}
 
 
 def get_monitor_status(factory, settings):
+    now = utcnow()
     with factory.begin() as session:
         config = _config(session)
         runs = list(session.scalars(select(AIRun).order_by(AIRun.started_at.desc()).limit(20)))
         server_enabled, key_configured = bool(settings.enable_ai_search), bool(settings.openai_api_key)
         effective = server_enabled and key_configured and config.enabled
         reason = "AI search is blocked by the server switch." if not server_enabled else "An OpenAI API key is not configured." if not key_configured else "AI search is paused in settings." if not config.enabled else None
-        next_run = (runs[0].started_at + timedelta(days=1 / config.runs_per_day)) if runs else utcnow()
-        today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_runs = list(session.scalars(select(AIRun).where(AIRun.started_at >= today)))
+        next_run = (runs[0].started_at + timedelta(days=1 / config.runs_per_day)) if runs else now
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_runs = list(session.scalars(select(AIRun).where(AIRun.started_at >= today, AIRun.started_at < today + timedelta(days=1))))
         used_today = len(today_runs)
         estimates = [run_dict(run)["estimatedUsd"] for run in today_runs]
         estimated_today = round(sum(value for value in estimates if value is not None), 6)
@@ -170,7 +178,8 @@ def get_monitor_status(factory, settings):
                 "warning": bool(threshold and estimated_today >= threshold)},
             "discoveryModel": settings.ai_discovery_model, "verificationModel": settings.ai_verification_model,
             "nextRunAt": iso(next_run) if effective else None,
-            "runs": [run_dict(run) for run in runs], "automaticPublication": False}
+            "runs": [run_dict(run) for run in runs], "automaticPublication": False,
+            "coverageToday": coverage_today(session, today_runs, now)}
 
 
 def update_monitor_settings(factory, settings, payload):
@@ -440,7 +449,7 @@ def _estimate_stage_cost(usage, rates, stage, billable_search_calls):
     return int(cost.quantize(Decimal(1), rounding=ROUND_HALF_UP)), basis
 
 
-def _usage(factory, run_id, response, calls=0, *, stage, model, rates):
+def _usage(factory, run_id, response, calls=0, *, stage, model, rates, pass_name=None):
     usage = response.get("usage")
     usage = usage if isinstance(usage, dict) else {}
     web_items = [item for item in response.get("output", [])
@@ -476,7 +485,7 @@ def _usage(factory, run_id, response, calls=0, *, stage, model, rates):
     output_tokens = output_tokens if type(output_tokens) is int and output_tokens >= 0 else 0
     with factory.begin() as session:
         run = session.get(AIRun, run_id)
-        run.stages = [*run.stages, {"stage": stage, "model": model, "inputTokens": input_tokens,
+        run.stages = [*run.stages, {"stage": stage, "pass": pass_name, "model": model, "inputTokens": input_tokens,
             "responseModel": response.get("model"), "serviceTier": response.get("service_tier"),
             "outputTokens": output_tokens, "webSearchCalls": calls,
             "webActionCounts": action_counts, "webActionStatusCounts": status_counts,
@@ -891,8 +900,17 @@ def _persist(factory, run_id, proposals, *, skipped_leads=0, negative_cache=(), 
         identities.update((_identity(candidate.title), (candidate.proposed_fields or {}).get("year")) for candidate in candidates)
         archives, citations = _archive_index(session) if any(
             proposal.get("evidence", {}).get("materialUpdate") for proposal in proposals) else ([], {})
-        created = 0
+        created, refreshed, stale_followups = 0, 0, 0
         for proposal in proposals:
+            from .research_followups import persist_followup
+            followup = persist_followup(session, proposal, run_id, utcnow())
+            if followup != "not_followup":
+                refreshed += followup == "updated"
+                stale_followups += followup == "stale"
+                if followup == "updated":
+                    existing_urls.update(_url_identity(url) for url in proposal["proposed_fields"].get("referenceUrls", []))
+                    identities.add((_identity(proposal["title"]), proposal["proposed_fields"].get("year")))
+                continue
             identity = (_identity(proposal["title"]), proposal["proposed_fields"].get("year"))
             references = proposal["proposed_fields"]["referenceUrls"]
             urls = {_url_identity(url) for url in references}
@@ -961,6 +979,13 @@ def _persist(factory, run_id, proposals, *, skipped_leads=0, negative_cache=(), 
         run.candidates_created, run.status, run.finished_at = created, "completed", utcnow()
         run.error = None
         run.skipped_leads = skipped_leads
+        if run.coverage:
+            coverage = dict(run.coverage)
+            coverage["verification"] = {**coverage["verification"], "updatedReports": refreshed}
+            if stale_followups:
+                coverage["limitations"] = [*coverage["limitations"],
+                    "A followup changed during verification; the newer review state was preserved."]
+            run.coverage = coverage
         session.flush()
         return run_dict(run)
 
@@ -972,92 +997,208 @@ def _require_identity_review(proposal, evidence, note):
     evidence["uncertainties"] = [*evidence.get("uncertainties", []), note]
 
 
-def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
-    """Run two bounded research stages only after both switches and quota pass.
+def _save_coverage(factory, run_id, coverage):
+    with factory.begin() as session:
+        session.get(AIRun, run_id).coverage = json.loads(json.dumps(coverage))
 
-    Tests pass a fake create_response(payload) client. Nothing starts at import,
-    on settings reads, or when an API key is configured.
-    """
+
+def _merge_leads(leads):
+    merged = {}
+    for lead in leads:
+        development = lead.get("development") or {}
+        key = (_identity(lead["title"]), lead.get("eventDate"),
+            development.get("reportedAt"), _phrase(development.get("summary")))
+        if key not in merged:
+            merged[key] = {**lead, "sourceUrls": list(lead["sourceUrls"])}
+        else:
+            merged[key]["sourceUrls"] = list(dict.fromkeys([*merged[key]["sourceUrls"], *lead["sourceUrls"]]))[:10]
+    return list(merged.values())
+
+
+def _backlog(factory, window_start, run_id):
+    with factory() as session:
+        audits = session.scalars(select(AIRun.coverage).where(AIRun.started_at >= window_start, AIRun.id != run_id)
+            .order_by(AIRun.started_at.desc()).limit(6))
+        for audit in audits:
+            if audit and audit.get("version") == 1:
+                # The latest audited run carries the bounded queue forward.
+                return audit.get("deferredLeads", [])[:30]
+    return []
+
+
+def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
+    """Run complementary open-web searches and verification inside one shared budget."""
+    from .research_followups import select_followups, bind_followups, record_followup_attempts
     run_id, owner, limits = _claim(factory, settings, trigger)
     client = client or OpenAIResponsesClient(settings.openai_api_key)
     now = utcnow()
-    discovery_calls = max(1, limits["max_tool_calls"] // 3)
+    # Always include the UTC reporting day, even with a shorter configured lookback.
+    window_start = min(now - timedelta(hours=limits["lookback_hours"]), now.replace(hour=0, minute=0, second=0, microsecond=0))
+    effective_hours = max(limits["lookback_hours"], (now - window_start).total_seconds() / 3600)
+    limits = {**limits, "lookback_hours": effective_hours}
+    budgets = tool_budgets(limits["max_tool_calls"])
+    coverage = new_coverage(now, window_start, budgets)
     try:
+        backlog = _backlog(factory, window_start, run_id)
+        coverage["deferredLeads"] = backlog
+        _save_coverage(factory, run_id, coverage)
         context = _context(factory)
         review_chat_id = getattr(settings, "telegram_review_chat_id", "") if getattr(settings, "telegram_review_enabled", False) else ""
-        window_start = now - timedelta(hours=limits["lookback_hours"])
         checkpoint = max(window_start, limits["last_success"] - timedelta(hours=6)) if limits["last_success"] else window_start
-        discovery_prompt = json.dumps({"task": (
-            "Find newly reported actual maritime cybersecurity incidents and new, substantial developments in previously "
-            "reported maritime incidents. Search broadly across regions and incident types, including ports, vessels, "
-            "shipping, offshore systems, GPS/AIS jamming or spoofing. Prioritise first-hand public statements from "
-            "affected operators and authorities and independent reporting in local languages. Prioritise reports after "
-            "the overlapping checkpoint within the full window. Preserve the original event date and first reporting "
-            "date. For a development, put the date and newly established facts in development. Use null for a new "
-            "incident. At discovery, return plausible named incident leads even with one original source. Independent "
-            "corroboration is the next stage's job. Include newly confirmed recovery, disruption, breach findings or "
-            "investigation details about an older attack when the new facts fall inside the reporting window. "
-            "A recent repost without new facts does not qualify. Return at most maxCandidates."
-            ),
-            "nowUTC": iso(now), "reportedSinceUTC": iso(window_start), "prioritySinceUTC": iso(checkpoint),
-            "reviewedInstructions": limits["prompt"]["discoveryInstructions"],
-            "scopePriorities": limits["scope_focus"],
-            "maxCandidates": limits["max_candidates"], **context}, ensure_ascii=False)
-        _ensure_enabled(factory, settings)
-        response = client.create_response(_request(settings.ai_discovery_model, discovery_prompt, DISCOVERY_SCHEMA,
-            "maritime_discovery", discovery_calls, 4500))
-        # Record billable usage even when subsequent structured/provenance validation fails.
-        calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
-        if isinstance(response, dict):
-            _usage(factory, run_id, response, calls, stage="discovery", model=settings.ai_discovery_model, rates=limits["cost_rates"])
-        discovered, discovery_urls, completed_calls, _ = _response_result(response, DISCOVERY_SCHEMA)
-        if completed_calls > discovery_calls or len(discovered["candidates"]) > limits["max_candidates"]:
-            raise AIResponseError("The discovery stage exceeded its configured limits.")
-        if not discovered["candidates"]:
+        found, discovery_urls, successful_passes = [], set(), 0
+        for index, plan in enumerate(coverage["passes"]):
+            if not plan["maxToolCalls"]:
+                continue
             _ensure_enabled(factory, settings)
-            return _persist(factory, run_id, [])
-        leads, fingerprints = _screen_leads(factory, discovered["candidates"], discovery_urls, limits, now)
-        skipped = len(discovered["candidates"]) - len(leads)
-        if not leads:
+            plan.update(status="running", usageMissing=True)
+            _save_coverage(factory, run_id, coverage)
+            task = (
+                "Find newly reported actual or suspected maritime cybersecurity incidents and substantial developments. "
+                "Search all requested maritime areas across regions; include attacks on supporting organisations when "
+                "their maritime connection is evidenced. Include AIS/GNSS/GPS spoofing or jamming, tracking and satellite "
+                "interference without claiming malicious cause unless sourced. Search the open web without choosing "
+                "or limiting publishers. Use several complementary targeted queries, including local-language terms. "
+                "Prefer first-hand operator/authority statements and independent original reporting. Return plausible "
+                "named leads even with one original source; the next stage must seek two independent sources. "
+                "Preserve eventDate and firstReportedAt. For a material development in an older incident, put only "
+                "the new facts and their reporting date in development. A recent repost alone is not new. "
+                "Search priorities supplement the whole scope. Pending drafts are leads awaiting corroboration, "
+                "not a reason to ignore new evidence. Return at most maxCandidates. "
+            )
+            if index:
+                task += (
+                    "This is a separate search for omissions. Reconsider the full reporting window, including the "
+                    "whole UTC day. Deliberately seek regions, maritime categories and local reporting missed by the "
+                    "primary search. Change query angles and language; do not simply repeat the earlier queries. "
+                    "Return additional leads or genuinely new evidence; do not repeat unchanged earlier findings."
+                )
+            prompt = json.dumps({"task": task, "pass": plan["name"], "nowUTC": iso(now),
+                "reportedSinceUTC": iso(window_start), "prioritySinceUTC": iso(checkpoint),
+                "coveragePlan": {"areas": coverage["requestedAreas"], "regions": coverage["requestedRegions"]},
+                "earlierFindings": found, "earlierQueries": [query for item in coverage["passes"][:index] for query in item["queries"]],
+                "deferredLeads": backlog, "reviewedInstructions": limits["prompt"]["discoveryInstructions"],
+                "scopePriorities": limits["scope_focus"], "maxCandidates": limits["max_candidates"], **context}, ensure_ascii=False)
+            try:
+                response = client.create_response(_request(settings.ai_discovery_model, prompt, DISCOVERY_SCHEMA,
+                    "maritime_discovery", plan["maxToolCalls"], 4500))
+                calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
+                if isinstance(response, dict):
+                    _usage(factory, run_id, response, calls, stage="discovery", pass_name=plan["name"],
+                        model=settings.ai_discovery_model, rates=limits["cost_rates"])
+                    plan["usageMissing"] = False
+                    plan["queries"] = trace_queries(response)
+                discovered, urls, completed_calls, _ = _response_result(response, DISCOVERY_SCHEMA)
+                if completed_calls > plan["maxToolCalls"] or len(discovered["candidates"]) > limits["max_candidates"]:
+                    raise AIResponseError("The discovery stage exceeded its configured limits.")
+                plan.update(status="completed", leadsFound=len(discovered["candidates"]), sourceCount=len(urls))
+                if not plan["queries"]:
+                    coverage["limitations"].append(plan["name"] + ": the provider did not return individual search queries.")
+                if index and plan["queries"] and not ({query.casefold() for query in plan["queries"]}
+                        - {query.casefold() for query in coverage["passes"][0]["queries"]}):
+                    coverage["limitations"].append("The complementary search repeated the primary queries; other search angles remain unchecked.")
+                if len(discovered["candidates"]) == limits["max_candidates"]:
+                    coverage["limitations"].append(plan["name"] + ": candidate limit reached; additional leads may remain.")
+                found.extend(discovered["candidates"])
+                discovery_urls.update(urls)
+                successful_passes += 1
+            except AIUnavailable:
+                raise
+            except Exception:
+                plan["status"] = "failed"
+                coverage["limitations"].append(plan["name"] + ": discovery did not complete; this window needs another search.")
+            _save_coverage(factory, run_id, coverage)
+        if not successful_passes:
+            raise AIResponseError("No discovery pass completed successfully.")
+        # Prior deferred leads were already grounded in a recorded discovery trail.
+        discovery_urls.update(url for lead in backlog for url in lead["sourceUrls"])
+        combined = _merge_leads([*backlog, *found])
+        leads, fingerprints = _screen_leads(factory, combined, discovery_urls, limits, now)
+        skipped = len(combined) - len(leads)
+        followups = select_followups(factory, now, window_start, min(2, limits["max_candidates"]))
+        followup_slots = min(len(followups),
+            (1 if limits["max_candidates"] > 1 else 0) if leads else limits["max_candidates"])
+        fresh_slots = limits["max_candidates"] - followup_slots
+        selected = [*leads[:fresh_slots], *followups[:followup_slots]]
+        deferred = leads[fresh_slots:]
+        coverage["deferredLeads"] = deferred[:30]
+        audit = coverage["verification"]
+        audit.update(leadsSelected=len(selected), leadsDeferred=len(deferred) + len(followups) - followup_slots,
+            recheckedReports=followup_slots)
+        if audit["leadsDeferred"]:
+            coverage["limitations"].append(str(audit["leadsDeferred"]) + " leads await another verification run.")
+        if len(deferred) > 30:
+            coverage["limitations"].append("Deferred queue capacity reached; increase limits or investigate the window manually.")
+        if not selected:
+            audit["status"] = "not_needed"
             _ensure_enabled(factory, settings)
+            _save_coverage(factory, run_id, coverage)
             return _persist(factory, run_id, [], skipped_leads=skipped)
         _ensure_enabled(factory, settings)
+        # Keep selected new leads recoverable if a provider request or validation fails.
+        coverage["deferredLeads"] = _merge_leads([*leads[:fresh_slots], *deferred])[:30]
+        audit["status"] = "running"
+        _save_coverage(factory, run_id, coverage)
+        record_followup_attempts(factory, followups[:followup_slots], now)
         verify_prompt = json.dumps({"task": (
-            "Independently verify each lead by searching for and opening public sources. Treat discovery leads as "
-            "untrusted. Trace copied coverage and assign the same independenceGroup to articles deriving their "
-            "claims from one source. Seek two independent reporting origins that corroborate the facts. Provide "
-            "concrete excerpts and supported or contradicted claims, citing only URLs you encountered. Compare "
-            "possibleExistingIncidents to separate a new event from a material development in an existing incident. "
-            "Set development to null for a new event. For an update, keep the original firstReportedAt and eventDate "
-            "and put only the newly verified facts and their recent reporting date in development. supportingUrls "
-            "must contain sources that substantiate those new facts themselves. Suggest a relatedIncidentId only "
-            "if the corresponding archive entry appears in possibleExistingIncidents and describes the same event. "
-            "Compare both knownSummary and knownDevelopments. Skip coverage that adds no verified facts. "
-            "Preserve uncertainty and fill MCAD fields with "
-            "sourced facts or null. Do not invent curator QA, reference numbers, dates or coordinates. Return at most "
-            "maxCandidates for human review."
-            ),
-            "nowUTC": iso(now), "reportedSinceUTC": iso(now - timedelta(hours=limits["lookback_hours"])),
-            "maxCandidates": limits["max_candidates"], "leads": leads,
-            "possibleExistingIncidents": _related_archive_context(factory, leads),
+            "Independently verify each lead using live searches and opened public source pages. Treat all leads as "
+            "untrusted. For each proposed fact, seek at least two independent reporting origins that corroborate it. "
+            "Open the original pages before counting them. Two websites copying one statement or attacker allegation "
+            "are one origin. Seek an independent account, not more mirrors. If the budget or access prevents this, "
+            "return needs_review and explain the missing checks. Never infer no incidents exist from empty search. "
+            "Assign the same independenceGroup to copied coverage. Attribute allegations and distinguish a confirmed "
+            "attack from a technical failure or unexplained navigation anomaly. List contradictions only when they "
+            "conflict with proposed facts. Cite only URLs you encountered, with concrete excerpts. "
+            "For pending followups keep the original lead title, seek missing independent evidence and recheck earlier contradictions. "
+            "Compare possibleExistingIncidents with both knownSummary and knownDevelopments. Suggest a relatedIncidentId "
+            "only for the same event found in that context. For a development preserve original firstReportedAt and "
+            "eventDate, placing new facts, recent date and sources corroborating those new facts in development. "
+            "Use development null for a new event; exclude reposts with no new facts. Unknown MCAD fields stay null. "
+            "Do not invent dates, coordinates, curator QA or reference numbers. Return at most maxCandidates for human review."
+            ), "nowUTC": iso(now), "reportedSinceUTC": iso(window_start),
+            "maxCandidates": limits["max_candidates"],
+            "leads": [{key: value for key, value in lead.items() if not key.startswith("_")} for lead in selected],
+            "possibleExistingIncidents": _related_archive_context(factory, selected),
             "reviewedInstructions": limits["prompt"]["verificationInstructions"],
             "reviewerFeedback": context["reviewerFeedback"]}, ensure_ascii=False)
         _ensure_enabled(factory, settings)
+        audit["usageMissing"] = True
+        _save_coverage(factory, run_id, coverage)
         response = client.create_response(_request(settings.ai_verification_model, verify_prompt, VERIFICATION_SCHEMA,
-            "maritime_verification", limits["max_tool_calls"] - discovery_calls, 9000))
+            "maritime_verification", budgets[2], 9000))
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
             _usage(factory, run_id, response, calls, stage="verification", model=settings.ai_verification_model, rates=limits["cost_rates"])
+            audit["usageMissing"] = False
         verified, verification_urls, completed_calls, opened_urls = _response_result(response, VERIFICATION_SCHEMA)
-        if completed_calls > limits["max_tool_calls"] - discovery_calls or len(verified["candidates"]) > limits["max_candidates"]:
+        if completed_calls > budgets[2] or len(verified["candidates"]) > limits["max_candidates"]:
             raise AIResponseError("The verification stage exceeded its configured limits.")
         _ensure_enabled(factory, settings)
-        proposals = _proposals(verified, verification_urls, opened_urls, run_id, now, limits["lookback_hours"])
+        proposals = _proposals(verified, verification_urls, opened_urls, run_id, now, effective_hours)
+        bind_followups(proposals, followups[:followup_slots])
+        unmatched = [proposal for proposal in proposals if proposal.pop("_followupUnmatched", False)]
+        proposals = [proposal for proposal in proposals if proposal not in unmatched]
+        if unmatched:
+            coverage["unmatchedFollowups"] = unmatched
+            audit["leadsDeferred"] += len(unmatched)
+            coverage["limitations"].append("Followup research could not be safely linked to the original draft; inspect the retained research evidence.")
+        audit["status"] = "completed"
+        if len(proposals) < len(selected):
+            coverage["limitations"].append("Some selected leads returned no valid current report; inspect source checks and pending drafts.")
+        if any(proposal["verification_status"] != "supported" for proposal in proposals):
+            coverage["limitations"].append("Some reports still lack independent corroboration or have conflicting claims.")
+        coverage["deferredLeads"] = deferred[:30]
+        _save_coverage(factory, run_id, coverage)
         return _persist(factory, run_id, proposals, skipped_leads=skipped, review_chat_id=review_chat_id,
-            negative_cache=fingerprints if not verified["candidates"] else ())
+            negative_cache=fingerprints[:fresh_slots] if not verified["candidates"] else ())
     except Exception as error:
-        # Do not store raw provider/HTTP/DB exception text: it can contain credentials or source bodies.
         message = str(error) if isinstance(error, (AIResponseError, AIUnavailable)) else "The AI research run failed validation or could not be completed."
+        for plan in coverage["passes"]:
+            if plan["status"] == "running":
+                plan["status"] = "failed"
+        if coverage["verification"]["status"] == "running":
+            coverage["verification"]["status"] = "failed"
+        coverage["limitations"].append(message[:255])
+        _save_coverage(factory, run_id, coverage)
         with factory.begin() as session:
             run = session.get(AIRun, run_id)
             run.status, run.finished_at, run.error = "failed", utcnow(), message[:255]

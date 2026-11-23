@@ -61,7 +61,7 @@ def development_run(incident_id, event_date, *, original_link_is_current=True, t
         item.update(snippet=text, supports=[text])
     if not original_link_is_current:
         row["sources"][0]["publishedAt"] = original_date
-    return FakeClient(response(found, urls=lead_urls), response(verified, urls=sources, opened=True))
+    return FakeClient(response(found, urls=lead_urls), response({"candidates": []}), response(verified, urls=sources, opened=True))
 
 
 def test_fresh_update_at_known_link_preserves_original_event_date(research):
@@ -71,8 +71,8 @@ def test_fresh_update_at_known_link_preserves_original_event_date(research):
     outcome = run_monitor_once(factory, settings, client=client)
     assert outcome["status"] == "completed"
     assert outcome["candidatesCreated"] == 1
-    assert len(client.requests) == 2
-    request = json.loads(client.requests[1]["input"][1]["content"])
+    assert len(client.requests) == 3
+    request = json.loads(client.requests[2]["input"][1]["content"])
     assert request["possibleExistingIncidents"][0]["id"] == incident_id
     with factory() as session:
         candidate = session.scalar(select(Candidate))
@@ -116,7 +116,7 @@ def test_previous_updates_are_available_to_verifier_and_not_requeued(research):
         }
     client = development_run(incident_id, event_date)
     assert run_monitor_once(factory, settings, client=client)["candidatesCreated"] == 0
-    request = json.loads(client.requests[1]["input"][1]["content"])
+    request = json.loads(client.requests[2]["input"][1]["content"])
     assert request["possibleExistingIncidents"][0]["knownDevelopments"] == [
         {"summary": DEVELOPMENT, "reportedAt": "2024-06-01"}
     ]

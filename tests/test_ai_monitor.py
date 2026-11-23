@@ -52,7 +52,7 @@ def verification():
 
 
 def response(data, urls=(URL_A, URL_B), *, opened=False):
-    tools = [{"type": "web_search_call", "action": {"type": "search", "sources": [{"url": url} for url in urls]}}]
+    tools = [{"type": "web_search_call", "action": {"type": "search", "queries": ["fictional maritime cyber incident"], "sources": [{"url": url} for url in urls]}}]
     if opened:
         tools.extend({"type": "web_search_call", "action": {"type": "open_page", "url": url}} for url in urls)
     for tool in tools:
@@ -94,7 +94,7 @@ class MonitorTests(unittest.TestCase):
             return session.scalar(select(func.count()).select_from(model))
 
     def happy_client(self, verified=None, *, opened=True):
-        return FakeClient(response(discovery()), response(verified or verification(), opened=opened))
+        return FakeClient(response(discovery()), response({"candidates": []}), response(verified or verification(), opened=opened))
 
     def test_key_alone_and_each_switch_cannot_start_a_paid_run(self):
         client = self.happy_client()
@@ -128,22 +128,22 @@ class MonitorTests(unittest.TestCase):
         leads = discovery()
         leads["candidates"].append({**leads["candidates"][0], "title": "Unsupported guess",
             "sourceUrls": ["file:///private", "https://unknown.example.net/missing"]})
-        client = FakeClient(response(leads))
+        client = FakeClient(response(leads), response({"candidates": []}))
         second = run_monitor_once(self.factory, self.settings, client=client)
-        self.assertEqual((second["status"], second["skippedLeads"], len(client.requests)), ("completed", 2, 1))
+        self.assertEqual((second["status"], second["skippedLeads"], len(client.requests)), ("completed", 2, 2))
 
     def test_empty_verification_is_cached_temporarily_and_pricing_uses_stage_usage(self):
         self.enable(dailyWarningUsd=0.02, scopeFocus="North Sea ports", costRates={
             "discoveryInput": 1, "discoveryOutput": 2, "verificationInput": 3,
             "verificationOutput": 4, "webCalls": 10})
-        first_client = FakeClient(response(discovery()), response({"candidates": []}, opened=True))
+        first_client = FakeClient(response(discovery()), response({"candidates": []}), response({"candidates": []}, opened=True))
         first = run_monitor_once(self.factory, self.settings, client=first_client)
-        self.assertEqual(first["estimatedUsd"], 0.02064)
+        self.assertEqual(first["estimatedUsd"], 0.03082)
         self.assertIn("North Sea ports", first_client.requests[0]["input"][1]["content"])
         self.assertTrue(get_monitor_status(self.factory, self.settings)["usageToday"]["warning"])
-        second_client = FakeClient(response(discovery()))
+        second_client = FakeClient(response(discovery()), response({"candidates": []}))
         second = run_monitor_once(self.factory, self.settings, client=second_client)
-        self.assertEqual((second["estimatedUsd"], second["skippedLeads"], len(second_client.requests)), (0.01018, 1, 1))
+        self.assertEqual((second["estimatedUsd"], second["skippedLeads"], len(second_client.requests)), (0.02036, 1, 2))
         with self.factory.begin() as session:
             session.execute(update(DiscoveryCache).values(expires_at=utcnow() - timedelta(seconds=1)))
         third = run_monitor_once(self.factory, self.settings, client=self.happy_client())
@@ -157,9 +157,9 @@ class MonitorTests(unittest.TestCase):
                 "dateStart": f"{now.year - 1}-02-02", "year": now.year - 1}, notify=False)
         discovered = discovery()
         discovered["candidates"][0]["eventDate"] = now.date().isoformat()
-        client = FakeClient(response(discovered), response(verification(), opened=True))
+        client = FakeClient(response(discovered), response({"candidates": []}), response(verification(), opened=True))
         run = run_monitor_once(self.factory, self.settings, client=client)
-        self.assertEqual((run["status"], run["skippedLeads"], len(client.requests)), ("completed", 0, 2))
+        self.assertEqual((run["status"], run["skippedLeads"], len(client.requests)), ("completed", 0, 3))
         with self.factory() as session:
             candidate = session.scalar(select(Candidate))
             self.assertEqual(candidate.verification_status, "needs_review")
@@ -169,9 +169,9 @@ class MonitorTests(unittest.TestCase):
         client = self.happy_client()
         result = run_monitor_once(self.factory, self.settings, client=client)
         self.assertEqual((result["status"], result["candidatesCreated"]), ("completed", 1))
-        self.assertEqual(result["inputTokens"], 200)
-        self.assertEqual(result["webSearchCalls"], 4)
-        self.assertEqual([p["model"] for p in client.requests], ["gpt-6-luna", "gpt-6.1-sol"])
+        self.assertEqual(result["inputTokens"], 300)
+        self.assertEqual(result["webSearchCalls"], 5)
+        self.assertEqual([p["model"] for p in client.requests], ["gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol"])
         self.assertEqual(sum(p["max_tool_calls"] for p in client.requests), 15)
         self.assertTrue(all(p["store"] is False for p in client.requests))
         self.assertTrue(all(p["tool_choice"] == "required" for p in client.requests))
@@ -191,11 +191,11 @@ class MonitorTests(unittest.TestCase):
         self.enable()
         data = response({"candidates": []})
         data["output"].insert(1, {"type": "web_search_call", "status": "searching",
-            "action": {"type": "search", "sources": [{"url": "https://unused.example.net/report"}]}})
+            "action": {"type": "search", "queries": ["fictional maritime cyber incident"], "sources": [{"url": "https://unused.example.net/report"}]}})
         data["tool_usage"] = {"web_search": {"num_requests": 1}}
-        run = run_monitor_once(self.factory, self.settings, client=FakeClient(data))
+        run = run_monitor_once(self.factory, self.settings, client=FakeClient(data, response({"candidates": []})))
         self.assertEqual(run["status"], "completed")
-        self.assertEqual((run["webSearchCalls"], run["billableSearchCalls"]), (2, 1))
+        self.assertEqual((run["webSearchCalls"], run["billableSearchCalls"]), (3, 2))
         self.assertEqual(self.count(Candidate), 0)
 
     def test_search_snippets_or_syndicated_sources_stay_in_review(self):
@@ -314,7 +314,7 @@ class MonitorTests(unittest.TestCase):
         verified = verification()
         unique_url = "https://another-public-source.example.com/new"
         verified["candidates"][0]["sources"][1]["url"] = unique_url
-        client = FakeClient(response(discovery()), response(verified, (URL_A, unique_url), opened=True))
+        client = FakeClient(response(discovery()), response({"candidates": []}), response(verified, (URL_A, unique_url), opened=True))
         run = run_monitor_once(self.factory, self.settings, client=client)
         self.assertEqual(run["candidatesCreated"], 1)
         with self.factory() as session:
@@ -357,10 +357,10 @@ class MonitorTests(unittest.TestCase):
 
     def test_no_results_with_no_source_urls_is_a_successful_empty_run(self):
         self.enable()
-        client = FakeClient(response({"candidates": []}, urls=()))
+        client = FakeClient(response({"candidates": []}, urls=()), response({"candidates": []}, urls=()))
         result = run_monitor_once(self.factory, self.settings, client=client)
         self.assertEqual((result["status"], result["candidatesCreated"]), ("completed", 0))
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(len(client.requests), 2)
 
     def test_pause_while_context_is_prepared_prevents_first_paid_call(self):
         self.enable()

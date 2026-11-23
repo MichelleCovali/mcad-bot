@@ -28,6 +28,8 @@ def check_history_upgrade(engine, history):
         ))
         connection.execute(text("INSERT INTO candidates (id, source_url, title, summary, matched_keywords, status, baseline, first_seen_at) VALUES "
                                 "('old-report', 'https://example.invalid/review', 'Existing report', '', '[]', 'pending', false, :now)"), {"now": now})
+        connection.execute(text("INSERT INTO ai_runs (id, trigger, status, started_at, candidates_created, input_tokens, output_tokens, web_search_calls, response_ids) "
+                                "VALUES ('old-run', 'manual', 'completed', :now, 0, 123, 4, 2, '[]')"), {"now": now})
         if history == "feature":
             connection.execute(text("UPDATE candidates SET relationship_type='possible_update', related_incident_id='old-incident' "
                                     "WHERE id='old-report'"))
@@ -44,7 +46,11 @@ def check_history_upgrade(engine, history):
     migrate(engine)
 
     with engine.connect() as connection:
-        assert list(connection.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version))) == list(range(1, 11))
+        assert list(connection.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version))) == [version for version, _ in MIGRATIONS]
+        assert "coverage" in {column["name"] for column in inspect(connection).get_columns("ai_runs")}
+        from mcad.models import AIRun
+        assert connection.scalar(select(AIRun.coverage).where(AIRun.id == "old-run")) == {}
+        assert connection.scalar(select(AIRun.input_tokens).where(AIRun.id == "old-run")) == 123
         assert {"admin_users", "admin_sessions", "telegram_feedback", "learning_prompt_versions", "incident_revisions"} <= set(inspect(connection).get_table_names())
         assert connection.scalar(text("SELECT title FROM incidents WHERE id='old-incident'")) == "Existing incident"
         relationship = connection.scalar(text("SELECT relationship_type FROM candidates WHERE id='old-report'"))

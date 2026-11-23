@@ -42,7 +42,7 @@ class ApplicationFlow(unittest.TestCase):
             for chat in ("123456", "654321"):
                 seed_subscriber(session, chat)
         update_monitor_settings(self.factory, self.settings, {"enabled": True})
-        provider = FakeClient(response(discovery()), response(verification(), opened=True))
+        provider = FakeClient(response(discovery()), response({"candidates": []}), response(verification(), opened=True))
         with patch("mcad.ai_monitor.OpenAIResponsesClient", return_value=provider):
             run = self.client.post("/api/admin/ai-monitor/runs", headers=self.auth)
         self.assertEqual(run.status_code, 200, run.text)
@@ -77,7 +77,7 @@ class ApplicationFlow(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/admin/candidates/{candidate['id']}/approve",
             headers=self.auth, json={"title": "Same reviewed report"}).json()["id"], approved.json()["id"])
         repeated = run_monitor_once(self.factory, self.settings,
-            client=FakeClient(response(discovery()), response(verification(), opened=True)))
+            client=FakeClient(response(discovery()), response({"candidates": []}), response(verification(), opened=True)))
         self.assertEqual(repeated["candidatesCreated"], 0)
         self.assertEqual(self.count(CandidateNotification), 1)
 
