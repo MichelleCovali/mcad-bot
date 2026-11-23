@@ -255,7 +255,10 @@ class MonitorTests(unittest.TestCase):
         broken["fields"]["title"] = "Untraceable second report"
         broken["sources"][0]["url"] = "https://unseen-source.example.com/fake"
         verified["candidates"].insert(0, broken)
-        result = run_monitor_once(self.factory, self.settings, client=self.happy_client(verified))
+        leads = discovery()
+        leads["candidates"].append({**leads["candidates"][0], "title": "Untraceable second report", "sourceUrls": [URL_B]})
+        client = FakeClient(response(leads), response({"candidates": []}), response(verified, opened=True))
+        result = run_monitor_once(self.factory, self.settings, client=client)
         self.assertEqual((result["status"], result["candidatesCreated"]), ("completed", 1))
         with self.factory() as session:
             candidate = session.scalar(select(Candidate))

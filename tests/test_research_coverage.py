@@ -181,3 +181,19 @@ def test_utc_daily_report_does_not_include_previous_day_or_future_rows(monitor):
     assert status["usageToday"]["runs"] == 1
     assert status["coverageToday"]["dateUTC"] == now.date().isoformat()
     assert status["coverageToday"]["runsWithoutAudit"] == 1
+
+
+def test_verifier_batch_reserves_room_for_corroboration_and_retains_omitted_leads(monitor):
+    factory, settings = monitor
+    found = discovery()
+    for index in range(1, 5):
+        found["candidates"].append({**found["candidates"][0], "title": f"Fictional distinct port {index}",
+            "sourceUrls": [f"https://port-{index}.example.org/report"]})
+    first = search(found)
+    first["output"][0]["action"]["sources"] += [{"url": row["sourceUrls"][0]} for row in found["candidates"][1:]]
+    client = FakeClient(first, search(query="other maritime incidents"), response(verification(), opened=True))
+    result = run_monitor_once(factory, settings, client=client)
+    prompt = json.loads(client.requests[2]["input"][1]["content"])
+    assert len(prompt["leads"]) == prompt["maxCandidates"] == 3
+    assert result["coverage"]["verification"]["leadsDeferred"] == 4
+    assert len(result["coverage"]["deferredLeads"]) == 4

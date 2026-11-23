@@ -1115,9 +1115,10 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
         leads, fingerprints = _screen_leads(factory, combined, discovery_urls, limits, now)
         skipped = len(combined) - len(leads)
         followups = select_followups(factory, now, window_start, min(2, limits["max_candidates"]))
-        followup_slots = min(len(followups),
-            (1 if limits["max_candidates"] > 1 else 0) if leads else limits["max_candidates"])
-        fresh_slots = limits["max_candidates"] - followup_slots
+        # Reserve room for a search and two opened origins per selected report.
+        capacity = min(limits["max_candidates"], max(1, budgets[2] // 3))
+        followup_slots = min(len(followups), (1 if capacity > 1 else 0) if leads else capacity)
+        fresh_slots = capacity - followup_slots
         selected = [*leads[:fresh_slots], *followups[:followup_slots]]
         deferred = leads[fresh_slots:]
         coverage["deferredLeads"] = deferred[:30]
@@ -1153,9 +1154,11 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
             "only for the same event found in that context. For a development preserve original firstReportedAt and "
             "eventDate, placing new facts, recent date and sources corroborating those new facts in development. "
             "Use development null for a new event; exclude reposts with no new facts. Unknown MCAD fields stay null. "
-            "Do not invent dates, coordinates, curator QA or reference numbers. Return at most maxCandidates for human review."
+            "Do not invent dates, coordinates, curator QA or reference numbers. Keep the report concise: at most four "
+            "sources per lead, short concrete excerpts and at most three supporting claims per source. "
+            "Return at most maxCandidates for human review."
             ), "nowUTC": iso(now), "reportedSinceUTC": iso(window_start),
-            "maxCandidates": limits["max_candidates"],
+            "maxCandidates": len(selected),
             "leads": [{key: value for key, value in lead.items() if not key.startswith("_")} for lead in selected],
             "possibleExistingIncidents": _related_archive_context(factory, selected),
             "reviewedInstructions": limits["prompt"]["verificationInstructions"],
@@ -1164,13 +1167,13 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
         audit["usageMissing"] = True
         _save_coverage(factory, run_id, coverage)
         response = client.create_response(_request(settings.ai_verification_model, verify_prompt, VERIFICATION_SCHEMA,
-            "maritime_verification", budgets[2], 9000))
+            "maritime_verification", budgets[2], min(18000, max(9000, len(selected) * 3000))))
         calls = sum(item.get("type") == "web_search_call" for item in response.get("output", [])) if isinstance(response, dict) else 0
         if isinstance(response, dict):
             _usage(factory, run_id, response, calls, stage="verification", model=settings.ai_verification_model, rates=limits["cost_rates"])
             audit["usageMissing"] = False
         verified, verification_urls, completed_calls, opened_urls = _response_result(response, VERIFICATION_SCHEMA)
-        if completed_calls > budgets[2] or len(verified["candidates"]) > limits["max_candidates"]:
+        if completed_calls > budgets[2] or len(verified["candidates"]) > len(selected):
             raise AIResponseError("The verification stage exceeded its configured limits.")
         _ensure_enabled(factory, settings)
         proposals = _proposals(verified, verification_urls, opened_urls, run_id, now, effective_hours)
@@ -1186,7 +1189,10 @@ def run_monitor_once(factory, settings, *, client=None, trigger="manual"):
             coverage["limitations"].append("Some selected leads returned no valid current report; inspect source checks and pending drafts.")
         if any(proposal["verification_status"] != "supported" for proposal in proposals):
             coverage["limitations"].append("Some reports still lack independent corroboration or have conflicting claims.")
-        coverage["deferredLeads"] = deferred[:30]
+        returned_titles = {_identity(proposal["title"]) for proposal in [*proposals, *unmatched]}
+        unreturned = [lead for lead in leads[:fresh_slots] if _identity(lead["title"]) not in returned_titles]
+        coverage["deferredLeads"] = _merge_leads([*deferred, *unreturned])[:30]
+        audit["leadsDeferred"] += len(unreturned)
         _save_coverage(factory, run_id, coverage)
         return _persist(factory, run_id, proposals, skipped_leads=skipped, review_chat_id=review_chat_id,
             negative_cache=fingerprints[:fresh_slots] if not verified["candidates"] else ())
